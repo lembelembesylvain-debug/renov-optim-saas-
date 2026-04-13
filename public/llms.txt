@@ -1,0 +1,17 @@
+# Rénov'Optim IA
+
+> SaaS B2B de calcul automatique des aides financières  
+> pour la rénovation énergétique (MaPrimeRénov', CEE).
+
+## À propos
+- Produit : Rénov'Optim IA
+- Cible : Bureaux d'études, MAR, artisans RGE
+- URL : https://renovoptim-ia.com
+
+## Pages principales
+- Accueil : https://renovoptim-ia.com/
+- Solution : https://renovoptim-ia.com/solution/
+- Tarifs : https://renovoptim-ia.com/tarifs/
+
+## Contact
+- Email : contact@energia-conseil-ia.com  
