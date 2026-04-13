@@ -1,0 +1,4 @@
+User-agent: *  
+Allow: /
+
+Sitemap: https://renovoptim-ia.com/sitemap.xml  
