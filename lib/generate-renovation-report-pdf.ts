@@ -577,4 +577,21 @@ export function generateRenovationReportPdf(input: RenovationReportInput): void 
     y = row(doc, y, "Puissance recommandée", `${computed.puissanceRecommandee} kW`, false);  
     y = row(doc, y, "Modèle suggéré", computed.modeleSuggere, true);  
     y = row(doc, y, "COP estimé", `${computed.copEstime}`, false);  
-    y = row
+    y = row (doc, y, "Économies annuelles PAC", fmt(computed.economiesAnnuelles), true);  
+  } else {  
+    doc.setFontSize(9);  
+    doc.setTextColor(150, 150, 150);  
+    doc.text("Aucun dimensionnement PAC renseigné pour ce dossier.", 14, y + 8);  
+    doc.setTextColor(...D);  
+  }
+
+  // Pages 14-35  
+  for (let i = p + 1; i <= 35; i++) {  
+    y = newPage(`Annexe ${i}`);  
+    y = secTitle(doc, y, `${i}. SECTION EN COURS`);  
+    doc.setFontSize(9);  
+    doc.text("Contenu en cours de rédaction — prochaine mise à jour.", 14, y + 8);  
+  }
+
+  doc.save(`rapport-renovation-${input.reportDate}.pdf`);  
+}  
