@@ -2,6 +2,23 @@ import { createClient } from "@supabase/supabase-js";
 import { NextRequest, NextResponse } from "next/server";
 import { Resend } from "resend";
 
+/** Domaine vérifié Resend (même logique que src/lib/emails/resendFrom côté monorepo). */
+const RESEND_VERIFIED_ADDRESS = "noreply@energia-conseil-ia.com";
+
+function buildResendFromHeader(
+  envFrom: string | undefined,
+  displayName: string,
+): string {
+  const raw = (envFrom?.trim() || RESEND_VERIFIED_ADDRESS).replace(
+    /renovoptim-ia\.com/gi,
+    "energia-conseil-ia.com",
+  );
+  if (raw.includes("<")) {
+    return raw;
+  }
+  return `${displayName} <${raw}>`;
+}
+
 type RegisterBody = {
   email?: string;
   password?: string;
@@ -63,8 +80,10 @@ export async function POST(req: NextRequest) {
   };
 
   const resendKey = process.env.RESEND_API_KEY;
-  const fromEmail =
-    process.env.RESEND_FROM_EMAIL ?? "onboarding@resend.dev";
+  const fromHeader = buildResendFromHeader(
+    process.env.RESEND_FROM_EMAIL,
+    "Rénov'Optim IA",
+  );
 
   /** Avec Resend : lien de confirmation généré puis envoyé par notre serveur. */
   if (resendKey) {
@@ -95,9 +114,7 @@ export async function POST(req: NextRequest) {
     try {
       const resend = new Resend(resendKey);
       const { error: sendError } = await resend.emails.send({
-        from: fromEmail.includes("<")
-          ? fromEmail
-          : `Rénov'Optim IA <${fromEmail}>`,
+        from: fromHeader,
         to: email,
         subject: "Confirmez votre compte Rénov'Optim IA",
         html: `
