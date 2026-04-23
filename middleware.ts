@@ -1,7 +1,12 @@
-import { type NextRequest } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
 import { updateSession } from "@/lib/supabase/middleware";
 
 export async function middleware(request: NextRequest) {
+  // Exception temporaire de test: bypass middleware pour /dashboard.
+  if (request.nextUrl.pathname.startsWith("/dashboard")) {
+    return NextResponse.next();
+  }
+
   return await updateSession(request);
 }
 

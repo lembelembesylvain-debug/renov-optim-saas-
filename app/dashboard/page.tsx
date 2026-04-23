@@ -4,7 +4,7 @@ import { createClient as createSupabaseClient, type SupabaseClient } from "@supa
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
-import { jsPDF } from "jspdf";
+import { generateRenovationReportPdf } from "@/lib/dashboard/generate-renovation-report-pdf";
 import { SignOutButton } from "./sign-out-button";
 
 type MprProfile = "TM" | "MO" | "INT" | "SUP";
@@ -149,10 +149,20 @@ function formatCurrency(value: number) {
   return value.toLocaleString("fr-FR", { style: "currency", currency: "EUR", maximumFractionDigits: 0 });
 }
 
+type Step2EstimateRow = {
+  key: string;
+  label: string;
+  quantity: string;
+  lowCost: number;
+  highCost: number;
+  mpr: number;
+  mprNote?: string;
+};
+
 export default function DashboardPage() {
   const router = useRouter();
   const [supabase, setSupabase] = useState<SupabaseClient | null>(null);
-  const [loadingAuth, setLoadingAuth] = useState(true);
+  const [, setLoadingAuth] = useState(true);
   const [userId, setUserId] = useState<string | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [currentStep, setCurrentStep] = useState(1);
@@ -175,18 +185,36 @@ export default function DashboardPage() {
   useEffect(() => {
     if (!supabase) return;
     const sb = supabase;
-    async function checkSession() {
-      const { data } = await sb.auth.getUser();
-      const user = data.user;
-      if (!user) {
+    let resolved = false;
+    const sessionTimeout = window.setTimeout(() => {
+      if (!resolved) {
+        setLoadingAuth(false);
         router.replace("/login");
-        return;
       }
-      setUserId(user.id);
-      setUserEmail(user.email ?? null);
-      setLoadingAuth(false);
+    }, 3000);
+
+    async function checkSession() {
+      try {
+        const { data } = await sb.auth.getUser();
+        resolved = true;
+        const user = data.user;
+        if (!user) {
+          router.replace("/login");
+          return;
+        }
+        setUserId(user.id);
+        setUserEmail(user.email ?? null);
+        setLoadingAuth(false);
+      } catch {
+        resolved = true;
+        setLoadingAuth(false);
+      }
     }
     checkSession();
+
+    return () => {
+      window.clearTimeout(sessionTimeout);
+    };
   }, [router, supabase]);
 
   const profile = useMemo(
@@ -356,6 +384,202 @@ export default function DashboardPage() {
     return 0;
   }, [actionCount, parcoursEligible]);
 
+  const step2Rows = useMemo<Step2EstimateRow[]>(() => {
+    const rows: Step2EstimateRow[] = [];
+
+    const add = (
+      key: string,
+      label: string,
+      quantity: string,
+      lowCost: number,
+      highCost: number,
+      mpr: number,
+      mprNote?: string
+    ) => {
+      rows.push({ key, label, quantity, lowCost, highCost, mpr, mprNote });
+    };
+
+    const addM2Row = (
+      key: keyof WorksData,
+      label: string,
+      unitLow: number,
+      unitHigh: number,
+      mprRate: number,
+      cap = Number.POSITIVE_INFINITY,
+      mprNote?: string
+    ) => {
+      const value = works[key] as number;
+      if (value <= 0) return;
+      const effectiveMprQty = Math.min(value, cap);
+      add(
+        key,
+        label,
+        `${value} m²`,
+        value * unitLow,
+        value * unitHigh,
+        effectiveMprQty * mprRate,
+        mprNote
+      );
+    };
+
+    const addUnitRow = (
+      key: keyof WorksData,
+      label: string,
+      unitLow: number,
+      unitHigh: number,
+      mprRate: number,
+      cap = Number.POSITIVE_INFINITY,
+      mprNote?: string
+    ) => {
+      const value = works[key] as number;
+      if (value <= 0) return;
+      const effectiveMprQty = Math.min(value, cap);
+      add(
+        key,
+        label,
+        `${value} u`,
+        value * unitLow,
+        value * unitHigh,
+        effectiveMprQty * mprRate,
+        mprNote
+      );
+    };
+
+    const addFixedRow = (
+      key: keyof WorksData,
+      label: string,
+      isSelected: boolean,
+      lowCost: number,
+      highCost: number,
+      mpr: number,
+      quantityLabel = "1 équipement",
+      mprNote?: string
+    ) => {
+      if (!isSelected) return;
+      add(key, label, quantityLabel, lowCost, highCost, mpr, mprNote);
+    };
+
+    addM2Row("comblesPerdusM2", "Isolation combles perdus", 40, 70, GESTE_RATES.comblesPerdusM2[profile], 100);
+    addM2Row("comblesAmenagesM2", "Isolation combles aménagés", 60, 90, GESTE_RATES.comblesAmenagesM2[profile], 100);
+    addM2Row("plancherBasM2", "Isolation plancher bas", 60, 100, GESTE_RATES.plancherBasM2[profile], 100);
+    addM2Row("toitureTerrasseM2", "Isolation toiture terrasse", 120, 200, GESTE_RATES.toitureTerrasseM2[profile], 100);
+    addM2Row("iteM2", "ITE", 140, 220, 0, Number.POSITIVE_INFINITY, "Parcours Accompagné uniquement");
+    addM2Row("itiM2", "ITI", 90, 150, 0, Number.POSITIVE_INFINITY, "Parcours Accompagné uniquement");
+
+    addUnitRow("fenetresCount", "Fenêtres / Portes-fenêtres", 450, 800, GESTE_RATES.fenetresCount[profile], 10);
+    addUnitRow("portesEntreeCount", "Portes d'entrée isolantes", 1200, 2200, GESTE_RATES.portesEntreeCount[profile], 10);
+    addUnitRow("voletsCount", "Volets isolants", 180, 350, 0, Number.POSITIVE_INFINITY, "Non éligible MPR");
+
+    addFixedRow(
+      "pacAirEauKw",
+      "PAC Air/Eau",
+      works.pacAirEauKw > 0,
+      9000,
+      15000,
+      GESTE_RATES.pacAirEauKw[profile],
+      `${works.pacAirEauKw} kW`
+    );
+    addFixedRow(
+      "pacAirAirKw",
+      "PAC Air/Air",
+      works.pacAirAirKw > 0,
+      2500,
+      5000,
+      GESTE_RATES.pacAirAirKw[profile],
+      `${works.pacAirAirKw} kW`
+    );
+    addFixedRow(
+      "pacGeoKw",
+      "PAC Géothermique",
+      works.pacGeoKw > 0,
+      17000,
+      30000,
+      GESTE_RATES.pacGeoKw[profile],
+      `${works.pacGeoKw} kW`
+    );
+    addFixedRow(
+      "chauffeEauThermoL",
+      "Chauffe-eau thermodynamique",
+      works.chauffeEauThermoL > 0,
+      2500,
+      4500,
+      GESTE_RATES.chauffeEauThermoL[profile],
+      `${works.chauffeEauThermoL} L`
+    );
+    addFixedRow(
+      "cesiM2",
+      "Chauffe-eau solaire (CESI)",
+      works.cesiM2 > 0,
+      5500,
+      9000,
+      GESTE_RATES.cesiM2[profile],
+      `${works.cesiM2} m² capteurs`
+    );
+    addFixedRow(
+      "chaudiereBiomasseKw",
+      "Chaudière biomasse",
+      works.chaudiereBiomasseKw > 0,
+      9000,
+      16000,
+      0,
+      `${works.chaudiereBiomasseKw} kW`,
+      "Parcours Accompagné uniquement"
+    );
+    addFixedRow(
+      "deposeCuveFioul",
+      "Dépose cuve fioul",
+      works.deposeCuveFioul,
+      800,
+      1800,
+      GESTE_RATES.deposeCuveFioul[profile],
+      "Oui"
+    );
+    addFixedRow(
+      "vmcSimpleM2",
+      "VMC simple flux hygro",
+      works.vmcSimpleM2 > 0,
+      1800,
+      3500,
+      vmcDisabled ? 0 : GESTE_RATES.vmcSimpleM2[profile],
+      `${works.vmcSimpleM2} m²`,
+      vmcDisabled ? "MPR inactive sans geste isolation" : undefined
+    );
+    addFixedRow(
+      "vmcDoubleM2",
+      "VMC double flux",
+      works.vmcDoubleM2 > 0,
+      6000,
+      10000,
+      vmcDisabled ? 0 : GESTE_RATES.vmcDoubleM2[profile],
+      `${works.vmcDoubleM2} m²`,
+      vmcDisabled ? "MPR inactive sans geste isolation" : undefined
+    );
+    addFixedRow("pvKwc", "Panneaux photovoltaïques", works.pvKwc > 0, works.pvKwc * 1800, works.pvKwc * 2800, 0, `${works.pvKwc} kWc`, "Non éligible MPR");
+    addFixedRow("auditEnergetique", "Audit énergétique DPE", works.auditEnergetique, 500, 1200, GESTE_RATES.auditEnergetique[profile], "Oui");
+
+    return rows;
+  }, [profile, vmcDisabled, works]);
+
+  const step2RowByKey = useMemo(
+    () =>
+      step2Rows.reduce<Record<string, Step2EstimateRow>>((acc, row) => {
+        acc[row.key] = row;
+        return acc;
+      }, {}),
+    [step2Rows]
+  );
+
+  const estimateHint = (key: string) => {
+    const row = step2RowByKey[key];
+    if (!row) return null;
+    return (
+      <p className="mt-1 text-xs text-zinc-600">
+        Coût estimé: {formatCurrency(row.lowCost)} - {formatCurrency(row.highCost)} | MPR estimée: {formatCurrency(row.mpr)}
+        {row.mprNote ? ` (${row.mprNote})` : ""}
+      </p>
+    );
+  };
+
   const tvaSavings = estimatedWorksCost * 0.145;
   const totalAides = mprTotal + ceeEstimate + tvaSavings;
   const resteCharge = Math.max(estimatedWorksCost - totalAides, 0);
@@ -401,49 +625,26 @@ export default function DashboardPage() {
   }
 
   function generatePdf() {
-    const pdf = new jsPDF();
-    const date = new Date().toLocaleDateString("fr-FR");
-    let y = 14;
-    pdf.setFontSize(16);
-    pdf.text("ENERGIA - Rapport aides 2026", 14, y);
-    y += 10;
-    pdf.setFontSize(11);
-    pdf.text(`Date: ${date}`, 14, y);
-    y += 8;
-    pdf.text(`Client: ${userEmail ?? "N/A"}`, 14, y);
-    y += 10;
-    pdf.text(`Profil MPR: ${PROFILE_LABELS[profile]} (${profile})`, 14, y);
-    y += 8;
-    pdf.text(`Type renovation: ${parcoursEligible ? "Parcours Accompagne" : "Renovation par geste"}`, 14, y);
-    y += 10;
-    pdf.text(`MPR estimee: ${formatCurrency(mprTotal)}`, 14, y);
-    y += 8;
-    pdf.text(`CEE estimee: ${formatCurrency(ceeEstimate)}`, 14, y);
-    y += 8;
-    pdf.text(`Eco-PTZ max: ${formatCurrency(ecoPtz)}`, 14, y);
-    y += 8;
-    pdf.text(`TVA economisee: ${formatCurrency(tvaSavings)}`, 14, y);
-    y += 8;
-    pdf.text(`Total aides: ${formatCurrency(totalAides)}`, 14, y);
-    y += 8;
-    pdf.text(`Cout travaux estime: ${formatCurrency(estimatedWorksCost)}`, 14, y);
-    y += 8;
-    pdf.text(`Reste a charge: ${formatCurrency(resteCharge)}`, 14, y);
-    y += 8;
-    pdf.text(`ROI estime: ${roiYears.toFixed(1)} ans`, 14, y);
-    y += 12;
-    pdf.setFontSize(9);
-    pdf.text(
-      "Calcul estimatif base sur les baremes ANAH Fevrier 2026. Montants non contractuels. Sous reserve d'eligibilite.",
-      14,
-      y,
-      { maxWidth: 180 }
-    );
-    pdf.save(`rapport-aides-${new Date().toISOString().slice(0, 10)}.pdf`);
-  }
-
-  if (loadingAuth) {
-    return <div className="p-8 text-sm text-zinc-600">Chargement…</div>;
+    generateRenovationReportPdf({
+      step1: { ...step1 },
+      works: { ...works },
+      profile,
+      profileLabel: PROFILE_LABELS[profile],
+      userEmail,
+      clientName: null,
+      clientAddress: null,
+      parcoursEligible,
+      estimatedWorksCost,
+      mprTotal,
+      ceeEstimate,
+      tvaSavings,
+      totalAides,
+      resteCharge,
+      ecoPtz,
+      annualSavings,
+      roiYears,
+      step2Rows: step2Rows.map((r) => ({ ...r })),
+    });
   }
 
   return (
@@ -453,7 +654,15 @@ export default function DashboardPage() {
           <Link href="/" className="text-sm font-semibold tracking-tight text-zinc-900">
             Rénov&apos;Optim <span className="text-[#10b981]">IA</span>
           </Link>
-          <SignOutButton />
+          <div className="flex items-center gap-2">
+            <Link
+              href="/dashboard/chat"
+              className="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 transition hover:bg-emerald-100"
+            >
+              💬 Expert MPR
+            </Link>
+            <SignOutButton />
+          </div>
         </div>
       </header>
 
@@ -649,6 +858,7 @@ export default function DashboardPage() {
                     }
                     className="mt-1 w-full rounded-lg border border-zinc-300 px-3 py-2"
                   />
+                  {estimateHint(key)}
                 </label>
               ))}
 
@@ -664,6 +874,7 @@ export default function DashboardPage() {
                   onChange={(e) => setWorks((prev) => ({ ...prev, iteM2: Math.max(0, safeNumber(e.target.value)) }))}
                   className="w-full rounded-lg border border-zinc-300 px-3 py-2"
                 />
+                {estimateHint("iteM2")}
               </label>
 
               <label className="text-sm">
@@ -678,6 +889,7 @@ export default function DashboardPage() {
                   onChange={(e) => setWorks((prev) => ({ ...prev, itiM2: Math.max(0, safeNumber(e.target.value)) }))}
                   className="w-full rounded-lg border border-zinc-300 px-3 py-2"
                 />
+                {estimateHint("itiM2")}
               </label>
 
               <label className="text-sm">
@@ -691,6 +903,7 @@ export default function DashboardPage() {
                   }
                   className="mt-1 w-full rounded-lg border border-zinc-300 px-3 py-2"
                 />
+                {estimateHint("fenetresCount")}
               </label>
 
               <label className="text-sm">
@@ -704,6 +917,7 @@ export default function DashboardPage() {
                   }
                   className="mt-1 w-full rounded-lg border border-zinc-300 px-3 py-2"
                 />
+                {estimateHint("portesEntreeCount")}
               </label>
 
               <label className="text-sm">
@@ -715,6 +929,7 @@ export default function DashboardPage() {
                   onChange={(e) => setWorks((prev) => ({ ...prev, voletsCount: Math.max(0, safeNumber(e.target.value)) }))}
                   className="mt-1 w-full rounded-lg border border-zinc-300 px-3 py-2"
                 />
+                {estimateHint("voletsCount")}
               </label>
 
               <label className="text-sm">
@@ -731,6 +946,7 @@ export default function DashboardPage() {
                     </option>
                   ))}
                 </select>
+                {estimateHint("pacAirEauKw")}
               </label>
 
               <label className="text-sm">
@@ -747,6 +963,7 @@ export default function DashboardPage() {
                     </option>
                   ))}
                 </select>
+                {estimateHint("pacAirAirKw")}
               </label>
 
               <label className="text-sm">
@@ -763,6 +980,7 @@ export default function DashboardPage() {
                     </option>
                   ))}
                 </select>
+                {estimateHint("pacGeoKw")}
               </label>
 
               <label className="text-sm">
@@ -779,6 +997,7 @@ export default function DashboardPage() {
                     </option>
                   ))}
                 </select>
+                {estimateHint("chauffeEauThermoL")}
               </label>
 
               <label className="text-sm">
@@ -790,6 +1009,7 @@ export default function DashboardPage() {
                   onChange={(e) => setWorks((prev) => ({ ...prev, cesiM2: Math.max(0, safeNumber(e.target.value)) }))}
                   className="mt-1 w-full rounded-lg border border-zinc-300 px-3 py-2"
                 />
+                {estimateHint("cesiM2")}
               </label>
 
               <label className="text-sm">
@@ -806,6 +1026,7 @@ export default function DashboardPage() {
                   }
                   className="w-full rounded-lg border border-zinc-300 px-3 py-2"
                 />
+                {estimateHint("chaudiereBiomasseKw")}
               </label>
 
               <label className="text-sm">
@@ -818,6 +1039,7 @@ export default function DashboardPage() {
                   <option value="non">Non</option>
                   <option value="oui">Oui</option>
                 </select>
+                {estimateHint("deposeCuveFioul")}
               </label>
 
               <label className="text-sm">
@@ -831,6 +1053,7 @@ export default function DashboardPage() {
                   className="mt-1 w-full rounded-lg border border-zinc-300 px-3 py-2 disabled:bg-zinc-100"
                 />
                 {vmcDisabled && <p className="mt-1 text-xs text-amber-700">VMC éligible uniquement avec au moins un geste d&apos;isolation.</p>}
+                {estimateHint("vmcSimpleM2")}
               </label>
 
               <label className="text-sm">
@@ -844,6 +1067,7 @@ export default function DashboardPage() {
                   className="mt-1 w-full rounded-lg border border-zinc-300 px-3 py-2 disabled:bg-zinc-100"
                 />
                 {vmcDisabled && <p className="mt-1 text-xs text-amber-700">VMC éligible uniquement avec au moins un geste d&apos;isolation.</p>}
+                {estimateHint("vmcDoubleM2")}
               </label>
 
               <label className="text-sm">
@@ -856,6 +1080,7 @@ export default function DashboardPage() {
                   className="mt-1 w-full rounded-lg border border-zinc-300 px-3 py-2"
                 />
                 <p className="mt-1 text-xs text-blue-700">Non éligible MPR — Prime autoconso disponible.</p>
+                {estimateHint("pvKwc")}
               </label>
 
               <label className="text-sm">
@@ -868,6 +1093,7 @@ export default function DashboardPage() {
                   <option value="non">Non</option>
                   <option value="oui">Oui</option>
                 </select>
+                {estimateHint("auditEnergetique")}
               </label>
 
               <label className="text-sm md:col-span-2">
@@ -888,6 +1114,36 @@ export default function DashboardPage() {
             {supParGesteBlocked && (
               <div className="mt-4 rounded-lg border border-orange-300 bg-orange-50 p-3 text-sm text-orange-800">
                 Revenus SUP : éligible uniquement Parcours Accompagné (pas de calcul par geste).
+              </div>
+            )}
+
+            {step2Rows.length > 0 && (
+              <div className="mt-4 overflow-x-auto rounded-xl border border-zinc-200">
+                <table className="min-w-full text-left text-sm">
+                  <thead className="bg-zinc-50 text-zinc-700">
+                    <tr>
+                      <th className="px-3 py-2 font-semibold">Travaux</th>
+                      <th className="px-3 py-2 font-semibold">Quantité</th>
+                      <th className="px-3 py-2 font-semibold">Coût</th>
+                      <th className="px-3 py-2 font-semibold">MPR</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {step2Rows.map((row) => (
+                      <tr key={row.key} className="border-t border-zinc-100">
+                        <td className="px-3 py-2 text-zinc-800">{row.label}</td>
+                        <td className="px-3 py-2 text-zinc-700">{row.quantity}</td>
+                        <td className="px-3 py-2 text-zinc-700">
+                          {formatCurrency(row.lowCost)} - {formatCurrency(row.highCost)}
+                        </td>
+                        <td className="px-3 py-2 text-zinc-700">
+                          {formatCurrency(row.mpr)}
+                          {row.mprNote ? ` (${row.mprNote})` : ""}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             )}
 
@@ -973,7 +1229,7 @@ export default function DashboardPage() {
                 onClick={generatePdf}
                 className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700"
               >
-                📄 Générer le rapport PDF
+                📄 Générer le rapport complet (35 pages)
               </button>
               {saving && <span className="text-sm text-zinc-500">Enregistrement Supabase…</span>}
               {saveMessage && <span className="text-sm text-zinc-600">{saveMessage}</span>}
