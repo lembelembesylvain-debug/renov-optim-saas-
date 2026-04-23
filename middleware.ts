@@ -8,8 +8,9 @@ export async function middleware(request: NextRequest) {
 export const config = {
   matcher: [
     /*
-     * Exclure fichiers statiques et préfetch ; tout le reste passe par la mise à jour session.
+     * Exclure API (checkout, auth, etc.), statiques et images pour éviter
+     * tout effet de bord sur les routes Stripe / Resend / Supabase admin.
      */
-    "/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
+    "/((?!_next/static|_next/image|favicon.ico|api/|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
   ],
 };

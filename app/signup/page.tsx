@@ -15,6 +15,47 @@ export default function SignupPage() {
   const [info, setInfo] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
+  async function signUpViaSupabaseClient() {
+    const supabase = createClient();
+    const origin =
+      typeof window !== "undefined" ? window.location.origin : "";
+
+    const { data, error: signUpError } = await supabase.auth.signUp({
+      email,
+      password,
+      options: {
+        emailRedirectTo: `${origin}/auth/callback`,
+        data: {
+          company_name: company || undefined,
+          trial_started_at: new Date().toISOString(),
+        },
+      },
+    });
+
+    if (signUpError) {
+      setError(signUpError.message);
+      setLoading(false);
+      return;
+    }
+
+    if (data.session) {
+      router.push("/dashboard");
+      router.refresh();
+      return;
+    }
+
+    await supabase.auth.resend({
+      type: "signup",
+      email,
+      options: { emailRedirectTo: `${origin}/auth/callback` },
+    });
+
+    setInfo(
+      "Compte créé. Un e-mail de confirmation vous a été envoyé (vérifiez les courriers indésirables). Si rien n’arrive, vérifiez dans Supabase : Authentication → Emails, ou configurez RESEND_API_KEY sur le serveur."
+    );
+    setLoading(false);
+  }
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
@@ -22,37 +63,58 @@ export default function SignupPage() {
     setLoading(true);
 
     try {
-      const supabase = createClient();
       const origin =
         typeof window !== "undefined" ? window.location.origin : "";
 
-      const { data, error: signUpError } = await supabase.auth.signUp({
-        email,
-        password,
-        options: {
-          emailRedirectTo: `${origin}/auth/callback`,
-          data: {
-            company_name: company || undefined,
-            trial_started_at: new Date().toISOString(),
-          },
-        },
-      });
+      const registerRes = await fetch(
+        `${origin}/api/auth/register`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            email: email.trim(),
+            password,
+            company: company.trim() || undefined,
+          }),
+        }
+      );
 
-      if (signUpError) {
-        setError(signUpError.message);
+      const payload = (await registerRes.json()) as {
+        error?: string;
+        fallbackToClient?: boolean;
+        ok?: boolean;
+        emailSent?: boolean;
+        warning?: string;
+      };
+
+      if (registerRes.status === 501 && payload.fallbackToClient) {
+        await signUpViaSupabaseClient();
+        return;
+      }
+
+      if (!registerRes.ok) {
+        setError(payload.error ?? "Inscription impossible.");
         setLoading(false);
         return;
       }
 
-      if (data.session) {
-        router.push("/dashboard");
-        router.refresh();
+      if (payload.emailSent) {
+        setInfo(
+          "Compte créé. Consultez votre boîte e-mail : nous vous avons envoyé un lien de confirmation (vérifiez les spams)."
+        );
+        setLoading(false);
         return;
       }
 
-      setInfo(
-        "Compte créé. Si la confirmation e-mail est activée sur votre projet Supabase, vérifiez votre boîte pour activer l’essai de 14 jours."
-      );
+      if (payload.warning) {
+        setInfo(
+          `Compte créé. ${payload.warning}`
+        );
+      } else {
+        setInfo(
+          "Compte créé. Si vous ne recevez pas d’e-mail, vérifiez RESEND_API_KEY et RESEND_FROM_EMAIL, ou la configuration e-mail Supabase (Authentication)."
+        );
+      }
       setLoading(false);
     } catch {
       setError("Une erreur est survenue. Réessayez.");
