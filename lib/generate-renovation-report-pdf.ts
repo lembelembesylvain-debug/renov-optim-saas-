@@ -4,22 +4,22 @@ import autoTable from "jspdf-autotable";
 export type MprProfile = "TM" | "MO" | "INT" | "SUP";
 
 export interface RenovationReportInput {  
-  clientName: string;  
-  clientAddress: string;  
+  clientName: string | null;  
+  clientAddress: string | null;  
   clientEmail?: string;  
   clientPhone?: string;  
-  advisorName: string;  
-  advisorCompany: string;  
-  reportDate: string;  
+  advisorName: string | null;  
+  advisorCompany: string | null;  
+  reportDate: string | null;  
   mprProfile: MprProfile;  
   isIdf: boolean;  
   occupants: number;  
   annualIncome: number;  
-  dpe: string;  
-  dpeGainTarget: string;  
+  dpe: string | null;  
+  dpeGainTarget: string | null;  
   gainClasses: number;  
   actionCount: number;  
-  renovationType: "monogeste" | "parcours_accompagne";  
+  renovationType?: "monogeste" | "parcours_accompagne";  
   selectedActions: {  
     label: string;  
     costHT: number;  
