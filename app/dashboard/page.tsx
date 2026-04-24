@@ -625,31 +625,5 @@ export default function DashboardPage() {
   }
 
 function generatePdf() {  
-  generateAuditPDF({  
-    clientName: "Client",  
-    clientAddress: clientAddress ?? step1?.clientAddress ?? "-",  
-    clientEmail: "",  
-    clientPhone: "",  
-    advisorName: "Sylvain LEMBELEMBE",  
-    advisorCompany: "ENERGIA CONSEIL IA®",  
-    reportDate: new Date().toISOString().split("T")[0],  
-    mprProfile: profile,  
-    isIdf: step1?.zone === "IDF",  
-    occupants: step1?.persons ?? 1,  
-    annualIncome: step1?.income ?? 0,  
-    dpe: step1?.dpe ?? "E",  
-    dpeGainTarget: "B",  
-    gainClasses: 2,  
-    actionCount: works ? Object.keys(works).length : 0,  
-    renovationType: parcoursEligible ? "parcours_accompagne" : "monogeste",  
-    selectedActions: [],  
-    totalCostHT: estimatedWorksCost ?? 0,  
-    totalMpr: mprTotal ?? 0,  
-    totalCee: ceeEstimate ?? 0,  
-    totalTva: tvaSavings ?? 0,  
-    totalAides: totalAides ?? 0,  
-    resteACharge: resteCharge ?? 0,  
-    ecoPtz: ecoPtz ?? 50000,  
-    roi: roiYears ?? 0,  
-  });  
+  alert("PDF en cours de développement - disponible prochainement !");  
 }  
