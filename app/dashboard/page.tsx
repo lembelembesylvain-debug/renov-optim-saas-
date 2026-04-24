@@ -625,10 +625,9 @@ export default function DashboardPage() {
   }
 
 function generatePdf() {  
-  alert("PDF en cours de développement - disponible prochainement !");  
-}    
+  generateAuditPDF({  
     clientName: "Client",  
-    clientAddress: clientAddress ?? step1?.clientAddress ?? "-",   
+    clientAddress: clientAddress ?? step1?.clientAddress ?? "-",  
     clientEmail: "",  
     clientPhone: "",  
     advisorName: "Sylvain LEMBELEMBE",  
