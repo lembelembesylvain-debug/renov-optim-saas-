@@ -624,9 +624,9 @@ export default function DashboardPage() {
     setSaving(false);
   }
 
-  function generatePdf() {
-    generateRenovationReportPdf({
-      step1: { ...step1 },
+  function generatePdf() {  
+  alert("PDF en cours de développement - disponible prochainement !");  
+},
       works: { ...works },
       profile,
       profileLabel: PROFILE_LABELS[profile],
@@ -1244,3 +1244,4 @@ export default function DashboardPage() {
     </div>
   );
 }
+
