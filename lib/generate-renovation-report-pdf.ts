@@ -156,9 +156,9 @@ export function generateRenovationReportPdf(input: RenovationReportInput): void 
   doc.text("CONSEILLER", 114, y + 8);  
   doc.setTextColor(...D);  
   doc.setFont("helvetica", "normal");  
-  doc.text(input.advisorName, 114, y + 16);  
-  doc.text(input.advisorCompany, 114, y + 23);  
-  doc.text(`Date : ${input.reportDate}`, 114, y + 33);  
+  doc.text(input.advisorName ?? "", 114, y + 16);   
+  doc.text(input.advisorCompany ?? "", 114, y + 23);    
+  doc.text(`Date : ${input.reportDate ?? ""}`, 114, y + 33);    
   doc.setFont("helvetica", "bold");  
   doc.text(`Profil : ${profileLabel(input.mprProfile)}`, 114, y + 43);  
   y += 68;
