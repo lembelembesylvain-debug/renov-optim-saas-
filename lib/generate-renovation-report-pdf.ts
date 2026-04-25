@@ -8,9 +8,9 @@ export interface RenovationReportInput {
   clientAddress: string | null;  
   clientEmail?: string;  
   clientPhone?: string;  
-  advisorName: string | null;  
-  advisorCompany: string | null;  
-  reportDate: string | null;  
+  advisorName?: string;  
+advisorCompany?: string;  
+reportDate?: string;  
   mprProfile: MprProfile;  
   isIdf: boolean;  
   occupants: number;  
