@@ -4,7 +4,6 @@ import { createClient as createSupabaseClient, type SupabaseClient } from "@supa
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
-import { generateRenovationReportPdf } from "@/lib/generate-renovation-report-pdf";
 import { SignOutButton } from "./sign-out-button";
 
 type MprProfile = "TM" | "MO" | "INT" | "SUP";
