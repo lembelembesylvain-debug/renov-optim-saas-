@@ -627,3 +627,36 @@ export default function DashboardPage() {
 function generatePdf() {  
   alert("PDF en cours de développement - disponible prochainement !");  
 }  
+  return (  
+    <div className="min-h-screen bg-zinc-50 p-8">  
+      <div className="max-w-4xl mx-auto">  
+        <div className="flex items-center justify-between mb-8">  
+          <h1 className="text-2xl font-bold text-zinc-900">Calculateur RenovOptim IA</h1>  
+          <div className="flex items-center gap-4">  
+            <span className="text-sm text-zinc-500">{userEmail}</span>  
+            <SignOutButton />  
+          </div>  
+        </div>  
+        <p className="text-zinc-600">Interface en cours de développement.</p>  
+        {saveMessage && (  
+          <p className="mt-4 text-sm text-blue-600">{saveMessage}</p>  
+        )}  
+        <div className="mt-6 flex gap-4">  
+          <button  
+            onClick={saveCalculation}  
+            disabled={saving}  
+            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"  
+          >  
+            {saving ? "Enregistrement..." : "Sauvegarder"}  
+          </button>  
+          <button  
+            onClick={generatePdf}  
+            className="px-4 py-2 bg-zinc-200 text-zinc-800 rounded-lg hover:bg-zinc-300"  
+          >  
+            Générer PDF  
+          </button>  
+        </div>  
+      </div>  
+    </div>  
+  );  
+}  
