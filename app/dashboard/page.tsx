@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { createClient as createSupabaseClient, type SupabaseClient } from "@supabase/supabase-js";
 import Link from "next/link";
@@ -616,13 +616,14 @@ export default function DashboardPage() {
     };
     const { error } = await supabase.from("calculations").insert(payload);
     if (error) {
-      setSaveMessage(`Enregistrement impossible: ${error.message}`);
+      setSaveMessage(`Enregistrement impossible: ${error}`); 
     } else {
-      setSaveMessage("Calcul enregistr├® dans Supabase.");
+      setSaveMessage("Calcul enregistré dans Supabase.");  
     }
     setSaving(false);
   }
 
   function generatePdf() {   
    alert("PDF en cours de développement - disponible prochainement !");    
+}  
 }  
