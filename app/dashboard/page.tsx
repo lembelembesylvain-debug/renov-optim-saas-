@@ -178,7 +178,7 @@ export default function DashboardPage() {
       setSaveMessage("Variables Supabase absentes: authentification et sauvegarde d├®sactiv├®es.");
       return;
     }
-    setSupabase(createSupabaseClient(url, anonKey));
+    createSupabaseClient() 
   }, []);
 
   useEffect(() => {
