@@ -2,7 +2,6 @@
 
 import { createClient as createSupabaseClient } from "@/lib/supabase";  
 import { type SupabaseClient } from "@supabase/supabase-js";  
-  
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
