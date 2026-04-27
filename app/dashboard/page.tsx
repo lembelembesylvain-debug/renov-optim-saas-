@@ -501,9 +501,30 @@ export default function DashboardPage() {
     setSaving(false);
   }
 
-  function generatePdf() {
-    alert("PDF en cours de développement - disponible prochainement !");
-  }
+  function generatePdf() {  
+  import("@/lib/generate-pdf").then(({ generateRenovOptimPdf }) => {  
+    generateRenovOptimPdf({  
+      housingType: step1.housingType,  
+      surfaceM2: step1.surfaceM2,  
+      zone: step1.zone,  
+      dpe: step1.dpe,  
+      income: step1.income,  
+      persons: step1.persons,  
+      profile,  
+      mprTotal,  
+      ceeEstimate,  
+      tvaSavings,  
+      totalAides,  
+      estimatedWorksCost,  
+      resteCharge,  
+      ecoPtz,  
+      annualSavings,  
+      roiYears,  
+      rows: step2Rows,  
+      userEmail: userEmail ?? undefined,  
+    });  
+  });  
+}  
 
   return (
     <div className="min-h-screen bg-zinc-50">
