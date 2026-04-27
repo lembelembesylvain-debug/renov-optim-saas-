@@ -494,7 +494,7 @@ export default function DashboardPage() {
     };
     const { error } = await supabase.from("calculations").insert(payload);
     if (error) {
-      setSaveMessage(`Enregistrement impossible: ${error}`);
+      setSaveMessage(`Enregistrement impossible: ${error.message}`);  
     } else {
       setSaveMessage("Calcul enregistré dans Supabase.");
     }
