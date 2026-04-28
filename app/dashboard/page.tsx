@@ -752,6 +752,107 @@ export default function DashboardPage() {
     setSaving(false);
   }
 
+  async function generatePdf() {
+    const gainClasses = works.dpeGainTarget === "3_CLASSES_OU_PLUS" ? 3 : 2;
+    const dpeGainTarget = dpeCibleRapport;
+
+    const costSum =
+      displayStep2Rows.reduce((acc, row) => acc + (row.lowCost + row.highCost) / 2, 0) || 1;
+    const selectedActions = displayStep2Rows.map((row) => {
+      const costHT = Math.round((row.lowCost + row.highCost) / 2);
+      const mprAmount = Math.round(row.mpr);
+      const mprRate =
+        costHT > 0 ? Math.min(100, Math.round((mprAmount / costHT) * 1000) / 10) : 0;
+      const weight = costHT / costSum;
+      const rowCeeOverride = marOverrides[row.key]?.ceeAmount;
+      const ceePortion =
+        rowCeeOverride != null && Number.isFinite(rowCeeOverride)
+          ? rowCeeOverride
+          : ceeRowAlloc[row.key] ?? 0;
+      return {
+        label: row.label,
+        costHT,
+        mprRate,
+        mprAmount,
+        ceeAmount: Math.round(ceePortion),
+        tva: Math.round(tvaSavings * weight),
+      };
+    });
+
+    const input = {
+      clientName: step1.clientName.trim() || userEmail?.split("@")[0] || "Client",
+      clientPrenom: step1.clientPrenom.trim() || null,
+      clientAddress: step1.clientAddress.trim() || "—",
+      clientEmail: step1.clientEmail.trim() || userEmail || "",
+      clientPhone: step1.clientPhone.trim() || "",
+      advisorName: "Sylvain LEMBELEMBE",
+      advisorCompany: "ENERGIA CONSEIL IA®",
+      reportDate: new Date().toISOString().split("T")[0],
+      mprProfile: profile as MprProfile,
+      isIdf: step1.zone === "IDF",
+      occupants: step1.persons,
+      annualIncome: step1.income,
+      dpe: step1.dpe,
+      dpeGainTarget,
+      gainClasses,
+      actionCount,
+      renovationType: parcoursEligible ? "parcours_accompagne" : "monogeste",
+      selectedActions,
+      totalCostHT: Math.round(effectiveCostHT),
+      totalMpr: Math.round(mprTotal),
+      totalCee: Math.round(effectiveCeeTotal),
+      totalTva: Math.round(tvaSavings),
+      totalAides: Math.round(totalAides),
+      resteACharge: Math.round(resteCharge),
+      ecoPtz,
+      roi: roiYears,
+      dimensionnementPac: {
+        form: {
+          surfaceChauffee: step1.surfaceM2,
+          hauteurPlafond: 2.5,
+          zoneClimatique: step1.zone === "IDF" ? "H1a" : "H2c",
+          dpe: step1.dpe,
+        },
+        computed: {
+          puissanceRecommandee: suggestedPacKw,
+          modeleSuggere: `PAC air/eau ~${suggestedPacKw} kW (chauffage ${step1.heatingMode})`,
+          copEstime: 4.2,
+          economiesAnnuelles: Math.round(annualSavings),
+        },
+      },
+    };
+
+    try {
+      setSaveMessage(null);
+      const res = await fetch("/api/renovation-report-pdf", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(input),
+      });
+      if (!res.ok) {
+        let detail = res.statusText;
+        try {
+          const j = (await res.json()) as { error?: string };
+          if (j.error) detail = j.error;
+        } catch {
+          detail = await res.text();
+        }
+        throw new Error(detail);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "rapport-renovation-" + input.reportDate + ".pdf";
+      a.click();
+      URL.revokeObjectURL(url);
+      setSaveMessage("PDF premium téléchargé.");
+    } catch (e) {
+      setSaveMessage(e instanceof Error ? e.message : "Erreur lors du téléchargement du PDF");
+    }
+  }
+
+
   async function saveDossierClient() {
     if (!userId || !supabase) {
       setSaveMessage("Connexion requise pour sauvegarder.");
@@ -832,13 +933,6 @@ export default function DashboardPage() {
 
   return (
     <div className="min-h-screen bg-zinc-50">
-      <style jsx global>{`
-        @media print {
-          header, nav, button, .no-print { display: none !important; }
-          body { background: white !important; }
-          * { font-family: Arial, sans-serif !important; }
-        }
-      `}</style>
       <header className="border-b border-zinc-200 bg-white">
         <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-4 sm:px-6 lg:px-8">
           <Link href="/" className="text-sm font-semibold tracking-tight text-zinc-900">
@@ -1741,7 +1835,7 @@ export default function DashboardPage() {
               <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-3">⏱️ ROI estimé : <strong>{roiYears.toFixed(1)} années</strong></div>
             </div>
 
-            <div className="no-print flex flex-wrap items-center gap-3 pt-2">
+            <div className="flex flex-wrap items-center gap-3 pt-2">
               <button
                 type="button"
                 onClick={() => setCurrentStep(2)}
@@ -1749,9 +1843,12 @@ export default function DashboardPage() {
               >
                 Retour aux travaux
               </button>
-              <button onClick={() => window.print()}
-                className="btn-print">
-                🖨️ Imprimer / Enregistrer en PDF
+              <button
+                type="button"
+                onClick={generatePdf}
+                className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700"
+              >
+                📄 Générer le rapport complet (35 pages)
               </button>
               <button
                 type="button"
