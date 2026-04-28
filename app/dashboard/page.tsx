@@ -1,24 +1,38 @@
 "use client";
 
-import { createClient as createSupabaseClient } from "@/lib/supabase";
-import { type SupabaseClient } from "@supabase/supabase-js";
+import { createClient as createSupabaseClient, type SupabaseClient } from "@supabase/supabase-js";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { SignOutButton } from "./sign-out-button";
+import {
+  DashboardAidesPie,
+  DashboardRoiChart,
+  DpeGauge,
+  type DpeLetter,
+} from "./dashboard-visuals";
 
-type MprProfile = "TM" | "MO" | "INT" | "SUP";
 type Zone = "IDF" | "HORS_IDF";
 type Dpe = "A" | "B" | "C" | "D" | "E" | "F" | "G";
+
+type HeatingMode = "GAZ" | "ELEC" | "FIOUL" | "BOIS" | "AUTRE";
+type MprProfile = "TM" | "MO" | "INT" | "SUP";
 
 type Step1Data = {
   housingType: "MAISON" | "APPARTEMENT" | "COPROPRIETE";
   surfaceM2: number;
-  constructionPeriod: "AV1948" | "P1948_74" | "P1975_89" | "P1990_2000" | "P2001_2012" | "AP2012";
+  constructionYear: number;
+  heatingMode: HeatingMode;
   zone: Zone;
   dpe: Dpe;
   income: number;
   persons: number;
+  clientPrenom: string;
+  clientName: string;
+  clientAddress: string;
+  clientEmail: string;
+  clientPhone: string;
+  livesInAura: boolean;
 };
 
 type WorksData = {
@@ -48,11 +62,18 @@ type WorksData = {
 const DEFAULT_STEP1: Step1Data = {
   housingType: "MAISON",
   surfaceM2: 100,
-  constructionPeriod: "P1975_89",
+  constructionYear: 1978,
+  heatingMode: "GAZ",
   zone: "HORS_IDF",
   dpe: "E",
   income: 30000,
   persons: 2,
+  clientPrenom: "",
+  clientName: "",
+  clientAddress: "",
+  clientEmail: "",
+  clientPhone: "",
+  livesInAura: false,
 };
 
 const DEFAULT_WORKS: WorksData = {
@@ -145,6 +166,25 @@ function getProfile(zone: Zone, persons: number, income: number): MprProfile {
   return "SUP";
 }
 
+const REF_YEAR = 2026;
+const MAR_PRISE_EN_CHARGE = 500;
+
+function buildingAgeYears(constructionYear: number): number {
+  return Math.max(0, REF_YEAR - constructionYear);
+}
+
+function suggestPacAirEauKw(surfaceM2: number, heating: HeatingMode): number {
+  const base = Math.max(4, Math.round(surfaceM2 / 42));
+  const mult: Record<HeatingMode, number> = {
+    GAZ: 1,
+    ELEC: 1.12,
+    FIOUL: 1.08,
+    BOIS: 0.92,
+    AUTRE: 1,
+  };
+  return Math.min(18, Math.max(4, Math.round(base * mult[heating])));
+}
+
 function formatCurrency(value: number) {
   return value.toLocaleString("fr-FR", { style: "currency", currency: "EUR", maximumFractionDigits: 0 });
 }
@@ -159,6 +199,32 @@ type Step2EstimateRow = {
   mprNote?: string;
 };
 
+type MarRowOverride = {
+  lowCost?: number;
+  highCost?: number;
+  mpr?: number;
+  ceeAmount?: number;
+  artisan?: string;
+  monthlyEuro?: number;
+};
+
+type DossierClientRow = {
+  id: string;
+  user_id: string;
+  client_nom: string | null;
+  client_prenom?: string | null;
+  client_adresse: string | null;
+  client_email?: string | null;
+  client_telephone?: string | null;
+  dpe_actuel: string | null;
+  dpe_cible: string | null;
+  profil_mpr: string | null;
+  travaux_json: Record<string, unknown>;
+  totaux_json: Record<string, unknown>;
+  created_at: string;
+  updated_at?: string;
+};
+
 export default function DashboardPage() {
   const router = useRouter();
   const [supabase, setSupabase] = useState<SupabaseClient | null>(null);
@@ -170,26 +236,76 @@ export default function DashboardPage() {
   const [works, setWorks] = useState<WorksData>(DEFAULT_WORKS);
   const [saving, setSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
+  const [marOverrides, setMarOverrides] = useState<Record<string, MarRowOverride>>({});
+  const [aidesLocalesEuro, setAidesLocalesEuro] = useState(0);
+  const [dpeTargetManual, setDpeTargetManual] = useState<DpeLetter | null>(null);
+  const [dossiers, setDossiers] = useState<DossierClientRow[]>([]);
+  const [loadingDossiers, setLoadingDossiers] = useState(false);
+  const [emailSending, setEmailSending] = useState(false);
+  const [savingDossier, setSavingDossier] = useState(false);
 
-  // Initialise le client Supabase (singleton)
   useEffect(() => {
-    const supabaseClient = createSupabaseClient();
-    setSupabase(supabaseClient);
+    const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+    if (!url || !anonKey) {
+      setLoadingAuth(false);
+      setSaveMessage("Variables Supabase absentes: authentification et sauvegarde désactivées.");
+      return;
+    }
+    setSupabase(createSupabaseClient(url, anonKey));
   }, []);
 
-  // Vérifie la session une fois le client prêt
   useEffect(() => {
     if (!supabase) return;
-    supabase.auth.getUser().then(({ data }) => {
-      if (!data.user) {
+    const sb = supabase;
+    let resolved = false;
+    const sessionTimeout = window.setTimeout(() => {
+      if (!resolved) {
+        setLoadingAuth(false);
         router.replace("/login");
-        return;
       }
-      setUserId(data.user.id);
-      setUserEmail(data.user.email ?? null);
-      setLoadingAuth(false);
-    });
-  }, [supabase, router]);
+    }, 3000);
+
+    async function checkSession() {
+      try {
+        const { data } = await sb.auth.getUser();
+        resolved = true;
+        const user = data.user;
+        if (!user) {
+          router.replace("/login");
+          return;
+        }
+        setUserId(user.id);
+        setUserEmail(user.email ?? null);
+        setLoadingAuth(false);
+      } catch {
+        resolved = true;
+        setLoadingAuth(false);
+      }
+    }
+    checkSession();
+
+    return () => {
+      window.clearTimeout(sessionTimeout);
+    };
+  }, [router, supabase]);
+
+  async function loadDossiersList() {
+    if (!userId || !supabase) return;
+    setLoadingDossiers(true);
+    const { data, error } = await supabase
+      .from("dossiers_clients")
+      .select("*")
+      .eq("user_id", userId)
+      .order("created_at", { ascending: false });
+    if (!error && data) setDossiers(data as DossierClientRow[]);
+    setLoadingDossiers(false);
+  }
+
+  useEffect(() => {
+    if (!userId || !supabase) return;
+    void loadDossiersList();
+  }, [userId, supabase]);
 
   const profile = useMemo(
     () => getProfile(step1.zone, step1.persons, step1.income),
@@ -267,56 +383,6 @@ export default function DashboardPage() {
     );
   }, [works]);
 
-  const mprParcours = useMemo(() => {
-    if (!parcoursEligible) return 0;
-    const plafond = works.dpeGainTarget === "2_CLASSES" ? 30000 : 40000;
-    const rateMap = {
-      TM: works.dpeGainTarget === "2_CLASSES" ? 0.9 : 1,
-      MO: 0.8,
-      INT: 0.5,
-      SUP: 0.1,
-    };
-    return Math.min(estimatedWorksCost, plafond) * rateMap[profile];
-  }, [estimatedWorksCost, parcoursEligible, profile, works.dpeGainTarget]);
-
-  const mprParGeste = useMemo(() => {
-    if (!isParGesteOnly || supParGesteBlocked) return 0;
-    const capped = {
-      comblesPerdusM2: Math.min(works.comblesPerdusM2, 100),
-      comblesAmenagesM2: Math.min(works.comblesAmenagesM2, 100),
-      plancherBasM2: Math.min(works.plancherBasM2, 100),
-      toitureTerrasseM2: Math.min(works.toitureTerrasseM2, 100),
-      fenetresCount: Math.min(works.fenetresCount, 10),
-      portesEntreeCount: Math.min(works.portesEntreeCount, 10),
-    };
-
-    const vmcFactor = vmcDisabled ? 0 : 1;
-    const wallIsolationAllowed = parcoursEligible ? 0 : 0;
-    const biomasseAllowed = parcoursEligible ? 0 : 0;
-
-    return (
-      capped.comblesPerdusM2 * GESTE_RATES.comblesPerdusM2[profile] +
-      capped.comblesAmenagesM2 * GESTE_RATES.comblesAmenagesM2[profile] +
-      capped.plancherBasM2 * GESTE_RATES.plancherBasM2[profile] +
-      capped.toitureTerrasseM2 * GESTE_RATES.toitureTerrasseM2[profile] +
-      wallIsolationAllowed * (works.iteM2 + works.itiM2) +
-      capped.fenetresCount * GESTE_RATES.fenetresCount[profile] +
-      capped.portesEntreeCount * GESTE_RATES.portesEntreeCount[profile] +
-      (works.pacAirEauKw > 0 ? GESTE_RATES.pacAirEauKw[profile] : 0) +
-      (works.pacGeoKw > 0 ? GESTE_RATES.pacGeoKw[profile] : 0) +
-      (works.pacAirAirKw > 0 ? GESTE_RATES.pacAirAirKw[profile] : 0) +
-      (works.cesiM2 > 0 ? GESTE_RATES.cesiM2[profile] : 0) +
-      (works.chauffeEauThermoL > 0 ? GESTE_RATES.chauffeEauThermoL[profile] : 0) +
-      (works.deposeCuveFioul ? GESTE_RATES.deposeCuveFioul[profile] : 0) +
-      vmcFactor * (works.vmcDoubleM2 > 0 ? GESTE_RATES.vmcDoubleM2[profile] : 0) +
-      vmcFactor * (works.vmcSimpleM2 > 0 ? GESTE_RATES.vmcSimpleM2[profile] : 0) +
-      biomasseAllowed * (works.chaudiereBiomasseKw > 0 ? 1 : 0) +
-      (works.auditEnergetique ? GESTE_RATES.auditEnergetique[profile] : 0)
-    );
-  }, [isParGesteOnly, supParGesteBlocked, vmcDisabled, parcoursEligible, works, profile]);
-
-  const mprTotal = parcoursEligible ? mprParcours : mprParGeste;
-
   const ceeEstimate = useMemo(() => {
     const avg = (min: number, max: number) => (min + max) / 2;
     return (
@@ -385,7 +451,15 @@ export default function DashboardPage() {
       const value = works[key] as number;
       if (value <= 0) return;
       const effectiveMprQty = Math.min(value, cap);
-      add(key, label, `${value} m²`, value * unitLow, value * unitHigh, effectiveMprQty * mprRate, mprNote);
+      add(
+        key,
+        label,
+        `${value} m²`,
+        value * unitLow,
+        value * unitHigh,
+        effectiveMprQty * mprRate,
+        mprNote
+      );
     };
 
     const addUnitRow = (
@@ -400,7 +474,15 @@ export default function DashboardPage() {
       const value = works[key] as number;
       if (value <= 0) return;
       const effectiveMprQty = Math.min(value, cap);
-      add(key, label, `${value} u`, value * unitLow, value * unitHigh, effectiveMprQty * mprRate, mprNote);
+      add(
+        key,
+        label,
+        `${value} u`,
+        value * unitLow,
+        value * unitHigh,
+        effectiveMprQty * mprRate,
+        mprNote
+      );
     };
 
     const addFixedRow = (
@@ -428,28 +510,167 @@ export default function DashboardPage() {
     addUnitRow("portesEntreeCount", "Portes d'entrée isolantes", 1200, 2200, GESTE_RATES.portesEntreeCount[profile], 10);
     addUnitRow("voletsCount", "Volets isolants", 180, 350, 0, Number.POSITIVE_INFINITY, "Non éligible MPR");
 
-    addFixedRow("pacAirEauKw", "PAC Air/Eau", works.pacAirEauKw > 0, 9000, 15000, GESTE_RATES.pacAirEauKw[profile], `${works.pacAirEauKw} kW`);
-    addFixedRow("pacAirAirKw", "PAC Air/Air", works.pacAirAirKw > 0, 2500, 5000, GESTE_RATES.pacAirAirKw[profile], `${works.pacAirAirKw} kW`);
-    addFixedRow("pacGeoKw", "PAC Géothermique", works.pacGeoKw > 0, 17000, 30000, GESTE_RATES.pacGeoKw[profile], `${works.pacGeoKw} kW`);
-    addFixedRow("chauffeEauThermoL", "Chauffe-eau thermodynamique", works.chauffeEauThermoL > 0, 2500, 4500, GESTE_RATES.chauffeEauThermoL[profile], `${works.chauffeEauThermoL} L`);
-    addFixedRow("cesiM2", "Chauffe-eau solaire (CESI)", works.cesiM2 > 0, 5500, 9000, GESTE_RATES.cesiM2[profile], `${works.cesiM2} m² capteurs`);
-    addFixedRow("chaudiereBiomasseKw", "Chaudière biomasse", works.chaudiereBiomasseKw > 0, 9000, 16000, 0, `${works.chaudiereBiomasseKw} kW`, "Parcours Accompagné uniquement");
-    addFixedRow("deposeCuveFioul", "Dépose cuve fioul", works.deposeCuveFioul, 800, 1800, GESTE_RATES.deposeCuveFioul[profile], "Oui");
-    addFixedRow("vmcSimpleM2", "VMC simple flux hygro", works.vmcSimpleM2 > 0, 1800, 3500, vmcDisabled ? 0 : GESTE_RATES.vmcSimpleM2[profile], `${works.vmcSimpleM2} m²`, vmcDisabled ? "MPR inactive sans geste isolation" : undefined);
-    addFixedRow("vmcDoubleM2", "VMC double flux", works.vmcDoubleM2 > 0, 6000, 10000, vmcDisabled ? 0 : GESTE_RATES.vmcDoubleM2[profile], `${works.vmcDoubleM2} m²`, vmcDisabled ? "MPR inactive sans geste isolation" : undefined);
+    addFixedRow(
+      "pacAirEauKw",
+      "PAC Air/Eau",
+      works.pacAirEauKw > 0,
+      9000,
+      15000,
+      GESTE_RATES.pacAirEauKw[profile],
+      `${works.pacAirEauKw} kW`
+    );
+    addFixedRow(
+      "pacAirAirKw",
+      "PAC Air/Air",
+      works.pacAirAirKw > 0,
+      2500,
+      5000,
+      GESTE_RATES.pacAirAirKw[profile],
+      `${works.pacAirAirKw} kW`
+    );
+    addFixedRow(
+      "pacGeoKw",
+      "PAC Géothermique",
+      works.pacGeoKw > 0,
+      17000,
+      30000,
+      GESTE_RATES.pacGeoKw[profile],
+      `${works.pacGeoKw} kW`
+    );
+    addFixedRow(
+      "chauffeEauThermoL",
+      "Chauffe-eau thermodynamique",
+      works.chauffeEauThermoL > 0,
+      2500,
+      4500,
+      GESTE_RATES.chauffeEauThermoL[profile],
+      `${works.chauffeEauThermoL} L`
+    );
+    addFixedRow(
+      "cesiM2",
+      "Chauffe-eau solaire (CESI)",
+      works.cesiM2 > 0,
+      5500,
+      9000,
+      GESTE_RATES.cesiM2[profile],
+      `${works.cesiM2} m² capteurs`
+    );
+    addFixedRow(
+      "chaudiereBiomasseKw",
+      "Chaudière biomasse",
+      works.chaudiereBiomasseKw > 0,
+      9000,
+      16000,
+      0,
+      `${works.chaudiereBiomasseKw} kW`,
+      "Parcours Accompagné uniquement"
+    );
+    addFixedRow(
+      "deposeCuveFioul",
+      "Dépose cuve fioul",
+      works.deposeCuveFioul,
+      800,
+      1800,
+      GESTE_RATES.deposeCuveFioul[profile],
+      "Oui"
+    );
+    addFixedRow(
+      "vmcSimpleM2",
+      "VMC simple flux hygro",
+      works.vmcSimpleM2 > 0,
+      1800,
+      3500,
+      vmcDisabled ? 0 : GESTE_RATES.vmcSimpleM2[profile],
+      `${works.vmcSimpleM2} m²`,
+      vmcDisabled ? "MPR inactive sans geste isolation" : undefined
+    );
+    addFixedRow(
+      "vmcDoubleM2",
+      "VMC double flux",
+      works.vmcDoubleM2 > 0,
+      6000,
+      10000,
+      vmcDisabled ? 0 : GESTE_RATES.vmcDoubleM2[profile],
+      `${works.vmcDoubleM2} m²`,
+      vmcDisabled ? "MPR inactive sans geste isolation" : undefined
+    );
     addFixedRow("pvKwc", "Panneaux photovoltaïques", works.pvKwc > 0, works.pvKwc * 1800, works.pvKwc * 2800, 0, `${works.pvKwc} kWc`, "Non éligible MPR");
     addFixedRow("auditEnergetique", "Audit énergétique DPE", works.auditEnergetique, 500, 1200, GESTE_RATES.auditEnergetique[profile], "Oui");
 
     return rows;
   }, [profile, vmcDisabled, works]);
 
+  const displayStep2Rows = useMemo(
+    () =>
+      step2Rows.map((r) => {
+        const o = marOverrides[r.key];
+        return {
+          ...r,
+          lowCost: o?.lowCost ?? r.lowCost,
+          highCost: o?.highCost ?? r.highCost,
+          mpr: o?.mpr ?? r.mpr,
+        };
+      }),
+    [step2Rows, marOverrides],
+  );
+
+  const effectiveCostHT = useMemo(() => {
+    if (displayStep2Rows.length === 0) return estimatedWorksCost;
+    return displayStep2Rows.reduce((s, r) => s + (r.lowCost + r.highCost) / 2, 0);
+  }, [displayStep2Rows, estimatedWorksCost]);
+
+  const ceeRowAlloc = useMemo(() => {
+    if (displayStep2Rows.length === 0) return {} as Record<string, number>;
+    const mids = displayStep2Rows.map((r) => (r.lowCost + r.highCost) / 2);
+    const total = mids.reduce((a, b) => a + b, 0) || 1;
+    const alloc: Record<string, number> = {};
+    displayStep2Rows.forEach((r, i) => {
+      alloc[r.key] = ceeEstimate * (mids[i]! / total);
+    });
+    return alloc;
+  }, [displayStep2Rows, ceeEstimate]);
+
+  const effectiveCeeTotal = useMemo(
+    () =>
+      displayStep2Rows.reduce((s, r) => {
+        const o = marOverrides[r.key]?.ceeAmount;
+        if (o != null && Number.isFinite(o)) return s + o;
+        return s + (ceeRowAlloc[r.key] ?? 0);
+      }, 0),
+    [displayStep2Rows, marOverrides, ceeRowAlloc],
+  );
+
+  const mprParcours = useMemo(() => {
+    if (!parcoursEligible) return 0;
+    const plafond = works.dpeGainTarget === "2_CLASSES" ? 30000 : 40000;
+    const rateMap = {
+      TM: works.dpeGainTarget === "2_CLASSES" ? 0.9 : 1,
+      MO: 0.8,
+      INT: 0.5,
+      SUP: 0.1,
+    };
+    return Math.min(effectiveCostHT, plafond) * rateMap[profile];
+  }, [effectiveCostHT, parcoursEligible, profile, works.dpeGainTarget]);
+
+  const mprParGesteFromRows = useMemo(() => {
+    if (!isParGesteOnly || supParGesteBlocked) return 0;
+    return displayStep2Rows.reduce((s, r) => s + r.mpr, 0);
+  }, [isParGesteOnly, supParGesteBlocked, displayStep2Rows]);
+
+  const mprTotal = parcoursEligible ? mprParcours : mprParGesteFromRows;
+
+  const buildingAge = buildingAgeYears(step1.constructionYear);
+  const auraRegionalAid = step1.livesInAura && (profile === "TM" || profile === "MO") ? 500 : 0;
+  const surfaceIsolationM2 = step1.surfaceM2 * 1.1;
+  const suggestedPacKw = suggestPacAirEauKw(step1.surfaceM2, step1.heatingMode);
+
   const step2RowByKey = useMemo(
     () =>
-      step2Rows.reduce<Record<string, Step2EstimateRow>>((acc, row) => {
+      displayStep2Rows.reduce<Record<string, Step2EstimateRow>>((acc, row) => {
         acc[row.key] = row;
         return acc;
       }, {}),
-    [step2Rows]
+    [displayStep2Rows],
   );
 
   const estimateHint = (key: string) => {
@@ -463,18 +684,48 @@ export default function DashboardPage() {
     );
   };
 
-  const tvaSavings = estimatedWorksCost * 0.145;
-  const totalAides = mprTotal + ceeEstimate + tvaSavings;
-  const resteCharge = Math.max(estimatedWorksCost - totalAides, 0);
+  const tvaSavings = buildingAge >= 2 ? effectiveCostHT * 0.145 : 0;
+  const aidesLocalesEtRegion = aidesLocalesEuro + auraRegionalAid;
+  const totalAides =
+    mprTotal + effectiveCeeTotal + tvaSavings + aidesLocalesEtRegion + MAR_PRISE_EN_CHARGE;
+  const resteCharge = Math.max(effectiveCostHT - totalAides, 0);
+
+  const monthlyFromRows = useMemo(
+    () => displayStep2Rows.reduce((s, r) => s + (marOverrides[r.key]?.monthlyEuro ?? 0), 0),
+    [displayStep2Rows, marOverrides],
+  );
 
   const annualSavings = useMemo(() => {
     const dpeFactor: Record<Dpe, number> = {
-      A: 0.02, B: 0.03, C: 0.04, D: 0.05, E: 0.07, F: 0.09, G: 0.11,
+      A: 0.02,
+      B: 0.03,
+      C: 0.04,
+      D: 0.05,
+      E: 0.07,
+      F: 0.09,
+      G: 0.11,
     };
-    return Math.max(estimatedWorksCost * dpeFactor[step1.dpe] * (1 + isolationGesturesCount * 0.08), 300);
-  }, [estimatedWorksCost, step1.dpe, isolationGesturesCount]);
+    const base = Math.max(
+      effectiveCostHT * dpeFactor[step1.dpe] * (1 + isolationGesturesCount * 0.08),
+      300,
+    );
+    const fromRows = monthlyFromRows * 12;
+    return Math.max(base, fromRows);
+  }, [effectiveCostHT, step1.dpe, isolationGesturesCount, monthlyFromRows]);
 
   const roiYears = annualSavings > 0 ? resteCharge / annualSavings : 0;
+
+  const dpeCibleRapport = useMemo((): Dpe => {
+    const gainClasses = works.dpeGainTarget === "3_CLASSES_OU_PLUS" ? 3 : 2;
+    const dpeOrder = ["G", "F", "E", "D", "C", "B", "A"] as const;
+    const di = dpeOrder.indexOf(step1.dpe as (typeof dpeOrder)[number]);
+    const auto = di >= 0 ? dpeOrder[Math.min(dpeOrder.length - 1, di + gainClasses)]! : "B";
+    return (dpeTargetManual ?? (auto as DpeLetter)) as Dpe;
+  }, [step1.dpe, works.dpeGainTarget, dpeTargetManual]);
+
+  const annualBillSansTravaux = Math.max(annualSavings * 1.35, effectiveCostHT * 0.045, 960);
+  const annualBillAvecTravaux = Math.max(annualBillSansTravaux - annualSavings, 220);
+
 
   async function saveCalculation() {
     if (!userId || !supabase) return;
@@ -488,463 +739,1112 @@ export default function DashboardPage() {
       profil_mpr: profile,
       travaux: works,
       total_mpr: Math.round(mprTotal),
-      total_cee: Math.round(ceeEstimate),
+      total_cee: Math.round(effectiveCeeTotal),
       total_aides: Math.round(totalAides),
       reste_a_charge: Math.round(resteCharge),
     };
     const { error } = await supabase.from("calculations").insert(payload);
     if (error) {
-      setSaveMessage(`Enregistrement impossible: ${error.message}`);  
+      setSaveMessage(`Enregistrement impossible: ${error.message}`);
     } else {
       setSaveMessage("Calcul enregistré dans Supabase.");
     }
     setSaving(false);
   }
 
-  function generatePdf() {  
-  import("@/lib/generate-pdf").then(({ generateRenovOptimPdf }) => {  
-    generateRenovOptimPdf({  
-      housingType: step1.housingType,  
-      surfaceM2: step1.surfaceM2,  
-      zone: step1.zone,  
-      dpe: step1.dpe,  
-      income: step1.income,  
-      persons: step1.persons,  
-      profile,  
-      mprTotal,  
-      ceeEstimate,  
-      tvaSavings,  
-      totalAides,  
-      estimatedWorksCost,  
-      resteCharge,  
-      ecoPtz,  
-      annualSavings,  
-      roiYears,  
-      rows: step2Rows,  
-      userEmail: userEmail ?? undefined,  
-    });  
-  });  
-}  
+  async function saveDossierClient() {
+    if (!userId || !supabase) {
+      setSaveMessage("Connexion requise pour sauvegarder.");
+      return;
+    }
+    setSavingDossier(true);
+    setSaveMessage(null);
+    const gainClasses = works.dpeGainTarget === "3_CLASSES_OU_PLUS" ? 3 : 2;
+    const dpeOrder = ["G", "F", "E", "D", "C", "B", "A"] as const;
+    const di = dpeOrder.indexOf(step1.dpe as (typeof dpeOrder)[number]);
+    const dpeCible = di >= 0 ? dpeOrder[Math.min(dpeOrder.length - 1, di + gainClasses)]! : "B";
+    const { error } = await supabase.from("dossiers_clients").insert({
+      user_id: userId,
+      client_nom: step1.clientName.trim() || null,
+      client_prenom: step1.clientPrenom.trim() || null,
+      client_email: step1.clientEmail.trim() || null,
+      client_telephone: step1.clientPhone.trim() || null,
+      client_adresse: step1.clientAddress.trim() || null,
+      annee_construction: step1.constructionYear,
+      type_logement: step1.housingType,
+      surface_habitable: step1.surfaceM2,
+      chauffage_actuel: step1.heatingMode,
+      dpe_actuel: step1.dpe,
+      dpe_cible: String(dpeTargetManual ?? dpeCible),
+      profil_mpr: profile,
+      revenus_annuels: step1.income,
+      occupants: step1.persons,
+      zone_idf: step1.zone === "IDF",
+      statut: "en_cours",
+      updated_at: new Date().toISOString(),
+      travaux_json: {
+        step1,
+        works,
+        marOverrides,
+        aidesLocalesEuro,
+      },
+      totaux_json: {
+        mprTotal,
+        effectiveCeeTotal,
+        tvaSavings,
+        totalAides,
+        resteCharge,
+        effectiveCostHT,
+        auraRegionalAid,
+      },
+    });
+    setSavingDossier(false);
+    if (error) setSaveMessage(`Dossier : ${error.message}`);
+    else {
+      setSaveMessage("Dossier client sauvegardé.");
+      await loadDossiersList();
+    }
+  }
+
+  function applyDossierRow(row: DossierClientRow) {
+    const raw = row.travaux_json as {
+      step1?: Step1Data;
+      works?: WorksData;
+      marOverrides?: Record<string, MarRowOverride>;
+      aidesLocalesEuro?: number;
+    };
+    if (raw.step1) setStep1((prev) => ({ ...prev, ...raw.step1 }));
+    if (raw.works) setWorks((prev) => ({ ...prev, ...raw.works }));
+    if (raw.marOverrides) setMarOverrides(raw.marOverrides);
+    if (typeof raw.aidesLocalesEuro === "number") setAidesLocalesEuro(raw.aidesLocalesEuro);
+    setSaveMessage("Dossier rechargé dans le formulaire.");
+  }
+
+  async function deleteDossierClient(id: string) {
+    if (!userId || !supabase) return;
+    const { error } = await supabase.from("dossiers_clients").delete().eq("id", id).eq("user_id", userId);
+    if (error) setSaveMessage(`Suppression : ${error.message}`);
+    else {
+      setSaveMessage("Dossier supprimé.");
+      await loadDossiersList();
+    }
+  }
 
   return (
     <div className="min-h-screen bg-zinc-50">
-      {/* Header */}
-      <header className="border-b border-zinc-200 bg-white px-6 py-4">
-        <div className="mx-auto flex max-w-5xl items-center justify-between">
-          <div className="flex items-center gap-3">
-            <span className="text-xl font-bold text-[#047857]">Rénov&apos;Optim IA</span>
-            <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700">Dashboard</span>
-          </div>
-          <div className="flex items-center gap-4">
-            {userEmail && <span className="text-sm text-zinc-500">{userEmail}</span>}
+      <style jsx global>{`
+        @media print {
+          header, nav, button, .no-print { display: none !important; }
+          body { background: white !important; }
+          * { font-family: Arial, sans-serif !important; }
+        }
+      `}</style>
+      <header className="border-b border-zinc-200 bg-white">
+        <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-4 sm:px-6 lg:px-8">
+          <Link href="/" className="text-sm font-semibold tracking-tight text-zinc-900">
+            Rénov&apos;Optim <span className="text-[#10b981]">IA</span>
+          </Link>
+          <div className="flex items-center gap-2">
+            <Link
+              href="/dashboard/chat"
+              className="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 transition hover:bg-emerald-100"
+            >
+              💬 Expert MPR
+            </Link>
             <SignOutButton />
           </div>
         </div>
       </header>
 
-      <main className="mx-auto max-w-5xl px-6 py-8">
-        {/* Steps nav */}
-        <nav className="mb-8 flex gap-2">
-          {[
-            { n: 1, label: "Logement & Profil" },
-            { n: 2, label: "Travaux" },
-            { n: 3, label: "Résultats" },
-          ].map(({ n, label }) => (
-            <button
-              key={n}
-              onClick={() => setCurrentStep(n)}
-              className={`flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-colors ${
-                currentStep === n
-                  ? "bg-[#047857] text-white"
-                  : "bg-white text-zinc-600 hover:bg-zinc-100 border border-zinc-200"
-              }`}
-            >
-              <span className={`flex h-5 w-5 items-center justify-center rounded-full text-xs ${currentStep === n ? "bg-white/20" : "bg-zinc-200"}`}>{n}</span>
-              {label}
-            </button>
-          ))}
-        </nav>
+      <main className="mx-auto max-w-6xl space-y-6 px-4 py-6 sm:px-6 lg:px-8">
+        <div className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
+          <h1 className="text-xl font-semibold text-zinc-900">MaPrimeRénov&apos; 2026 OFFICIEL</h1>
+          <p className="mt-1 text-sm text-zinc-600">Barèmes ANAH Février 2026 - calcul estimatif non contractuel.</p>
 
-        {/* STEP 1 */}
-        {currentStep === 1 && (
-          <div className="space-y-6">
-            <div className="rounded-2xl border border-zinc-200 bg-white p-6 shadow-sm">
-              <h2 className="mb-4 text-lg font-semibold text-zinc-800">Votre logement</h2>
-              <div className="grid gap-4 sm:grid-cols-2">
-                <div>
-                  <label className="block text-sm font-medium text-zinc-700">Type de logement</label>
-                  <select
-                    value={step1.housingType}
-                    onChange={(e) => setStep1({ ...step1, housingType: e.target.value as Step1Data["housingType"] })}
-                    className="mt-1 block w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm focus:border-[#047857] focus:outline-none"
-                  >
-                    <option value="MAISON">Maison individuelle</option>
-                    <option value="APPARTEMENT">Appartement</option>
-                    <option value="COPROPRIETE">Copropriété</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-zinc-700">Surface (m²)</label>
-                  <input
-                    type="number"
-                    value={step1.surfaceM2}
-                    onChange={(e) => setStep1({ ...step1, surfaceM2: safeNumber(e.target.value, 100) })}
-                    className="mt-1 block w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm focus:border-[#047857] focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-zinc-700">Période de construction</label>
-                  <select
-                    value={step1.constructionPeriod}
-                    onChange={(e) => setStep1({ ...step1, constructionPeriod: e.target.value as Step1Data["constructionPeriod"] })}
-                    className="mt-1 block w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm focus:border-[#047857] focus:outline-none"
-                  >
-                    <option value="AV1948">Avant 1948</option>
-                    <option value="P1948_74">1948 – 1974</option>
-                    <option value="P1975_89">1975 – 1989</option>
-                    <option value="P1990_2000">1990 – 2000</option>
-                    <option value="P2001_2012">2001 – 2012</option>
-                    <option value="AP2012">Après 2012</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-zinc-700">Zone géographique</label>
-                  <select
-                    value={step1.zone}
-                    onChange={(e) => setStep1({ ...step1, zone: e.target.value as Zone })}
-                    className="mt-1 block w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm focus:border-[#047857] focus:outline-none"
-                  >
-                    <option value="HORS_IDF">Hors Île-de-France</option>
-                    <option value="IDF">Île-de-France</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-zinc-700">DPE actuel</label>
-                  <select
-                    value={step1.dpe}
-                    onChange={(e) => setStep1({ ...step1, dpe: e.target.value as Dpe })}
-                    className="mt-1 block w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm focus:border-[#047857] focus:outline-none"
-                  >
-                    {(["A","B","C","D","E","F","G"] as Dpe[]).map((d) => (
-                      <option key={d} value={d}>Classe {d}</option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-            </div>
-
-            <div className="rounded-2xl border border-zinc-200 bg-white p-6 shadow-sm">
-              <h2 className="mb-4 text-lg font-semibold text-zinc-800">Votre profil MaPrimeRénov&apos;</h2>
-              <div className="grid gap-4 sm:grid-cols-2">
-                <div>
-                  <label className="block text-sm font-medium text-zinc-700">Revenus fiscaux du foyer (€/an)</label>
-                  <input
-                    type="number"
-                    value={step1.income}
-                    onChange={(e) => setStep1({ ...step1, income: safeNumber(e.target.value, 0) })}
-                    className="mt-1 block w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm focus:border-[#047857] focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-zinc-700">Nombre de personnes dans le foyer</label>
-                  <input
-                    type="number"
-                    min={1}
-                    value={step1.persons}
-                    onChange={(e) => setStep1({ ...step1, persons: safeNumber(e.target.value, 1) })}
-                    className="mt-1 block w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm focus:border-[#047857] focus:outline-none"
-                  />
-                </div>
-              </div>
-              <div className="mt-4 flex items-center gap-3">
-                <span className="text-sm text-zinc-600">Profil détecté :</span>
-                <span className={`rounded-full border px-3 py-1 text-sm font-semibold ${PROFILE_BADGES[profile]}`}>
-                  {PROFILE_LABELS[profile]}
-                </span>
-              </div>
-            </div>
-
-            <div className="flex justify-end">
-              <button
-                onClick={() => setCurrentStep(2)}
-                className="rounded-lg bg-[#047857] px-6 py-2.5 text-sm font-medium text-white hover:bg-[#065f46]"
+          <div className="mt-4 grid grid-cols-3 gap-2 text-xs font-medium sm:text-sm">
+            {[1, 2, 3].map((step) => (
+              <div
+                key={step}
+                className={`rounded-lg border px-3 py-2 text-center ${
+                  currentStep >= step ? "border-emerald-300 bg-emerald-50 text-emerald-700" : "border-zinc-200 text-zinc-500"
+                }`}
               >
-                Étape suivante →
-              </button>
-            </div>
+                Étape {step}
+              </div>
+            ))}
           </div>
-        )}
+        </div>
 
-        {/* STEP 2 */}
-        {currentStep === 2 && (
-          <div className="space-y-6">
-            <div className="rounded-2xl border border-zinc-200 bg-white p-6 shadow-sm">
-              <h2 className="mb-4 text-lg font-semibold text-zinc-800">Isolation</h2>
-              <div className="grid gap-4 sm:grid-cols-2">
-                {[
-                  { key: "comblesPerdusM2", label: "Combles perdus (m²)" },
-                  { key: "comblesAmenagesM2", label: "Combles aménagés (m²)" },
-                  { key: "plancherBasM2", label: "Plancher bas (m²)" },
-                  { key: "toitureTerrasseM2", label: "Toiture terrasse (m²)" },
-                  { key: "iteM2", label: "ITE – Isolation par l'extérieur (m²)" },
-                  { key: "itiM2", label: "ITI – Isolation par l'intérieur (m²)" },
-                ].map(({ key, label }) => (
-                  <div key={key}>
-                    <label className="block text-sm font-medium text-zinc-700">{label}</label>
-                    <input
-                      type="number"
-                      min={0}
-                      value={works[key as keyof WorksData] as number}
-                      onChange={(e) => setWorks({ ...works, [key]: safeNumber(e.target.value) })}
-                      className="mt-1 block w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm focus:border-[#047857] focus:outline-none"
-                    />
-                    {estimateHint(key)}
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="rounded-2xl border border-zinc-200 bg-white p-6 shadow-sm">
-              <h2 className="mb-4 text-lg font-semibold text-zinc-800">Menuiseries</h2>
-              <div className="grid gap-4 sm:grid-cols-3">
-                {[
-                  { key: "fenetresCount", label: "Fenêtres / Portes-fenêtres" },
-                  { key: "portesEntreeCount", label: "Portes d'entrée" },
-                  { key: "voletsCount", label: "Volets isolants" },
-                ].map(({ key, label }) => (
-                  <div key={key}>
-                    <label className="block text-sm font-medium text-zinc-700">{label}</label>
-                    <input
-                      type="number"
-                      min={0}
-                      value={works[key as keyof WorksData] as number}
-                      onChange={(e) => setWorks({ ...works, [key]: safeNumber(e.target.value) })}
-                      className="mt-1 block w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm focus:border-[#047857] focus:outline-none"
-                    />
-                    {estimateHint(key)}
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="rounded-2xl border border-zinc-200 bg-white p-6 shadow-sm">
-              <h2 className="mb-4 text-lg font-semibold text-zinc-800">Chauffage & Eau chaude</h2>
-              <div className="grid gap-4 sm:grid-cols-2">
-                {[
-                  { key: "pacAirEauKw", label: "PAC Air/Eau (kW)" },
-                  { key: "pacAirAirKw", label: "PAC Air/Air (kW)" },
-                  { key: "pacGeoKw", label: "PAC Géothermique (kW)" },
-                  { key: "chauffeEauThermoL", label: "Chauffe-eau thermodynamique (L)" },
-                  { key: "cesiM2", label: "CESI – Chauffe-eau solaire (m²)" },
-                  { key: "chaudiereBiomasseKw", label: "Chaudière biomasse (kW)" },
-                  { key: "pvKwc", label: "Panneaux photovoltaïques (kWc)" },
-                ].map(({ key, label }) => (
-                  <div key={key}>
-                    <label className="block text-sm font-medium text-zinc-700">{label}</label>
-                    <input
-                      type="number"
-                      min={0}
-                      value={works[key as keyof WorksData] as number}
-                      onChange={(e) => setWorks({ ...works, [key]: safeNumber(e.target.value) })}
-                      className="mt-1 block w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm focus:border-[#047857] focus:outline-none"
-                    />
-                    {estimateHint(key)}
-                  </div>
-                ))}
-              </div>
-              <div className="mt-4 flex items-center gap-3">
-                <input
-                  type="checkbox"
-                  id="deposeCuveFioul"
-                  checked={works.deposeCuveFioul}
-                  onChange={(e) => setWorks({ ...works, deposeCuveFioul: e.target.checked })}
-                  className="h-4 w-4 rounded border-zinc-300 text-[#047857]"
-                />
-                <label htmlFor="deposeCuveFioul" className="text-sm font-medium text-zinc-700">
-                  Dépose cuve fioul
-                </label>
-              </div>
-            </div>
-
-            <div className="rounded-2xl border border-zinc-200 bg-white p-6 shadow-sm">
-              <h2 className="mb-4 text-lg font-semibold text-zinc-800">Ventilation & Audit</h2>
-              <div className="grid gap-4 sm:grid-cols-2">
-                <div>
-                  <label className="block text-sm font-medium text-zinc-700">VMC simple flux hygro (m²)</label>
-                  <input
-                    type="number"
-                    min={0}
-                    value={works.vmcSimpleM2}
-                    onChange={(e) => setWorks({ ...works, vmcSimpleM2: safeNumber(e.target.value) })}
-                    className="mt-1 block w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm focus:border-[#047857] focus:outline-none"
-                  />
-                  {estimateHint("vmcSimpleM2")}
+        {currentStep === 1 && (
+          <section className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
+            <h2 className="text-lg font-semibold text-zinc-900">Étape 1/3 - Logement</h2>
+            <div className="mt-4 grid gap-4 md:grid-cols-2">
+              <label className="space-y-1 text-sm">
+                <span className="font-medium text-zinc-700">Type de logement</span>
+                <div className="flex flex-wrap gap-3">
+                  {[
+                    ["MAISON", "Maison individuelle"],
+                    ["APPARTEMENT", "Appartement"],
+                  ].map(([value, label]) => (
+                    <label key={value} className="flex items-center gap-2">
+                      <input
+                        type="radio"
+                        checked={step1.housingType === value}
+                        onChange={() => setStep1((prev) => ({ ...prev, housingType: value as Step1Data["housingType"] }))}
+                      />
+                      {label}
+                    </label>
+                  ))}
                 </div>
-                <div>
-                  <label className="block text-sm font-medium text-zinc-700">VMC double flux (m²)</label>
-                  <input
-                    type="number"
-                    min={0}
-                    value={works.vmcDoubleM2}
-                    onChange={(e) => setWorks({ ...works, vmcDoubleM2: safeNumber(e.target.value) })}
-                    className="mt-1 block w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm focus:border-[#047857] focus:outline-none"
-                  />
-                  {estimateHint("vmcDoubleM2")}
-                </div>
-              </div>
-              <div className="mt-4 flex items-center gap-3">
-                <input
-                  type="checkbox"
-                  id="auditEnergetique"
-                  checked={works.auditEnergetique}
-                  onChange={(e) => setWorks({ ...works, auditEnergetique: e.target.checked })}
-                  className="h-4 w-4 rounded border-zinc-300 text-[#047857]"
-                />
-                <label htmlFor="auditEnergetique" className="text-sm font-medium text-zinc-700">
-                  Audit énergétique DPE
-                </label>
-              </div>
-            </div>
+              </label>
 
-            {parcoursEligible && (
-              <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-6">
-                <h3 className="mb-2 font-semibold text-emerald-800">🎯 Parcours Accompagné éligible !</h3>
-                <p className="mb-3 text-sm text-emerald-700">Votre projet est éligible au Parcours Accompagné MaPrimeRénov&apos;. Choisissez votre objectif de gain DPE :</p>
+              <label className="space-y-1 text-sm">
+                <span className="font-medium text-zinc-700">Surface habitable (m²)</span>
+                <input
+                  type="number"
+                  min={10}
+                  max={500}
+                  value={step1.surfaceM2}
+                  onChange={(e) =>
+                    setStep1((prev) => ({
+                      ...prev,
+                      surfaceM2: Math.min(500, Math.max(10, safeNumber(e.target.value, 10))),
+                    }))
+                  }
+                  className="w-full rounded-lg border border-zinc-300 px-3 py-2"
+                />
+              </label>
+
+              <label className="space-y-1 text-sm">
+                <span className="font-medium text-zinc-700">Année de construction</span>
+                <input
+                  type="number"
+                  min={1800}
+                  max={REF_YEAR}
+                  value={step1.constructionYear}
+                  onChange={(e) =>
+                    setStep1((prev) => ({
+                      ...prev,
+                      constructionYear: Math.min(
+                        REF_YEAR,
+                        Math.max(1800, safeNumber(e.target.value, prev.constructionYear)),
+                      ),
+                    }))
+                  }
+                  className="w-full rounded-lg border border-zinc-300 px-3 py-2"
+                />
+                {buildingAgeYears(step1.constructionYear) < 2 && (
+                  <p className="mt-1 text-xs font-medium text-red-700">
+                    Non éligible TVA 5,5% (logement de moins de 2 ans).
+                  </p>
+                )}
+                {buildingAgeYears(step1.constructionYear) > 15 && (
+                  <p className="mt-1 text-xs font-medium text-emerald-700">
+                    Éligible MaPrimeRénov&apos; (bâtiment &gt; 15 ans) ✅
+                  </p>
+                )}
+              </label>
+
+              <label className="space-y-1 text-sm">
+                <span className="font-medium text-zinc-700">Mode de chauffage actuel</span>
                 <select
-                  value={works.dpeGainTarget}
-                  onChange={(e) => setWorks({ ...works, dpeGainTarget: e.target.value as WorksData["dpeGainTarget"] })}
-                  className="rounded-lg border border-emerald-300 bg-white px-3 py-2 text-sm focus:border-emerald-500 focus:outline-none"
+                  value={step1.heatingMode}
+                  onChange={(e) =>
+                    setStep1((prev) => ({ ...prev, heatingMode: e.target.value as Step1Data["heatingMode"] }))
+                  }
+                  className="w-full rounded-lg border border-zinc-300 px-3 py-2"
                 >
-                  <option value="2_CLASSES">Gain de 2 classes DPE</option>
-                  <option value="3_CLASSES_OU_PLUS">Gain de 3 classes ou plus</option>
+                  <option value="GAZ">Gaz</option>
+                  <option value="ELEC">Électrique</option>
+                  <option value="FIOUL">Fioul</option>
+                  <option value="BOIS">Bois</option>
+                  <option value="AUTRE">Autre</option>
                 </select>
+              </label>
+
+              <label className="space-y-1 text-sm md:col-span-2">
+                <span className="font-medium text-zinc-700">Nombre de fenêtres</span>
+                <input
+                  type="number"
+                  min={0}
+                  value={works.fenetresCount}
+                  onChange={(e) =>
+                    setWorks((prev) => ({ ...prev, fenetresCount: Math.max(0, safeNumber(e.target.value)) }))
+                  }
+                  className="mt-1 w-full max-w-xs rounded-lg border border-zinc-300 px-3 py-2"
+                />
+              </label>
+
+              <label className="space-y-1 text-sm md:col-span-2">
+                <span className="font-medium text-zinc-700">Auvergne-Rhône-Alpes (forfait 500 € si profil TM/MO)</span>
+                <label className="mt-1 flex items-center gap-2 text-zinc-800">
+                  <input
+                    type="checkbox"
+                    checked={step1.livesInAura}
+                    onChange={(e) => setStep1((prev) => ({ ...prev, livesInAura: e.target.checked }))}
+                  />
+                  Logement situé en AuRA
+                </label>
+              </label>
+
+              <label className="space-y-1 text-sm">
+                <span className="font-medium text-zinc-700">Zone géographique</span>
+                <div className="flex gap-4">
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="radio"
+                      checked={step1.zone === "IDF"}
+                      onChange={() => setStep1((prev) => ({ ...prev, zone: "IDF" }))}
+                    />
+                    Île-de-France
+                  </label>
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="radio"
+                      checked={step1.zone === "HORS_IDF"}
+                      onChange={() => setStep1((prev) => ({ ...prev, zone: "HORS_IDF" }))}
+                    />
+                    Hors Île-de-France
+                  </label>
+                </div>
+              </label>
+
+              <label className="space-y-1 text-sm">
+                <span className="font-medium text-zinc-700">DPE actuel</span>
+                <div className="flex flex-wrap gap-2">
+                  {["A", "B", "C", "D", "E", "F", "G"].map((dpe) => (
+                    <label key={dpe} className="flex items-center gap-1">
+                      <input
+                        type="radio"
+                        checked={step1.dpe === dpe}
+                        onChange={() => setStep1((prev) => ({ ...prev, dpe: dpe as Dpe }))}
+                      />
+                      {dpe}
+                    </label>
+                  ))}
+                </div>
+              </label>
+
+              <label className="space-y-1 text-sm">
+                <span className="font-medium text-zinc-700">Revenus foyer fiscal (€/an)</span>
+                <input
+                  type="number"
+                  min={0}
+                  value={step1.income}
+                  onChange={(e) => setStep1((prev) => ({ ...prev, income: Math.max(0, safeNumber(e.target.value)) }))}
+                  className="w-full rounded-lg border border-zinc-300 px-3 py-2"
+                />
+              </label>
+
+              <label className="space-y-1 text-sm">
+                <span className="font-medium text-zinc-700">Nombre de personnes</span>
+                <select
+                  value={step1.persons}
+                  onChange={(e) => setStep1((prev) => ({ ...prev, persons: safeNumber(e.target.value, 1) }))}
+                  className="w-full rounded-lg border border-zinc-300 px-3 py-2"
+                >
+                  <option value={1}>1</option>
+                  <option value={2}>2</option>
+                  <option value={3}>3</option>
+                  <option value={4}>4</option>
+                  <option value={5}>5</option>
+                  <option value={6}>6+</option>
+                </select>
+              </label>
+
+              <label className="space-y-1 text-sm">
+                <span className="font-medium text-zinc-700">Nom du client</span>
+                <input
+                  type="text"
+                  value={step1.clientName}
+                  onChange={(e) => setStep1((prev) => ({ ...prev, clientName: e.target.value }))}
+                  className="w-full rounded-lg border border-zinc-300 px-3 py-2"
+                  placeholder="Nom complet"
+                />
+              </label>
+
+              <label className="space-y-1 text-sm">
+                <span className="font-medium text-zinc-700">Prénom du client</span>
+                <input
+                  type="text"
+                  value={step1.clientPrenom}
+                  onChange={(e) => setStep1((prev) => ({ ...prev, clientPrenom: e.target.value }))}
+                  className="w-full rounded-lg border border-zinc-300 px-3 py-2"
+                  placeholder="Prénom"
+                />
+              </label>
+
+              <label className="space-y-1 text-sm">
+                <span className="font-medium text-zinc-700">Adresse du logement</span>
+                <input
+                  type="text"
+                  value={step1.clientAddress}
+                  onChange={(e) => setStep1((prev) => ({ ...prev, clientAddress: e.target.value }))}
+                  className="w-full rounded-lg border border-zinc-300 px-3 py-2"
+                  placeholder="Ville, rue…"
+                />
+              </label>
+
+              <label className="space-y-1 text-sm md:col-span-2">
+                <span className="font-medium text-zinc-700">E-mail du client (rapport PDF)</span>
+                <input
+                  type="email"
+                  value={step1.clientEmail}
+                  onChange={(e) => setStep1((prev) => ({ ...prev, clientEmail: e.target.value }))}
+                  className="w-full rounded-lg border border-zinc-300 px-3 py-2"
+                  placeholder="client@exemple.fr"
+                />
+              </label>
+
+              <label className="space-y-1 text-sm md:col-span-2">
+                <span className="font-medium text-zinc-700">Téléphone du client</span>
+                <input
+                  type="tel"
+                  value={step1.clientPhone}
+                  onChange={(e) => setStep1((prev) => ({ ...prev, clientPhone: e.target.value }))}
+                  className="w-full rounded-lg border border-zinc-300 px-3 py-2"
+                  placeholder="06 00 00 00 00"
+                />
+              </label>
+            </div>
+
+            <div className="mt-3 rounded-lg border border-zinc-200 bg-zinc-50 p-3 text-xs text-zinc-700">
+              <p>
+                <strong>Surface isolation (×1,1) :</strong> {surfaceIsolationM2.toFixed(1)} m² —{" "}
+                <strong>PAC air/eau suggérée :</strong> ~{suggestedPacKw} kW (indicatif selon surface et chauffage).
+              </p>
+            </div>
+
+            {["A", "B", "C", "D"].includes(step1.dpe) && (
+              <div className="mt-4 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800">
+                Attention : Le Parcours Accompagné est réservé aux logements classés E, F ou G.
               </div>
             )}
 
-            <div className="flex justify-between">
+            <div className="mt-4 flex items-center gap-3">
+              <span className="text-sm text-zinc-700">Profil détecté :</span>
+              <span className={`rounded-full border px-3 py-1 text-sm font-semibold ${PROFILE_BADGES[profile]}`}>
+                {profile === "TM" ? "🔵" : profile === "MO" ? "🟡" : profile === "INT" ? "🟣" : "🌸"} {PROFILE_LABELS[profile]}
+              </span>
+            </div>
+
+
+            <div className="mt-6 rounded-xl border border-zinc-200 bg-zinc-50 p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-sm font-semibold text-zinc-900">Mes dossiers</p>
+                <button
+                  type="button"
+                  disabled={savingDossier}
+                  onClick={() => void saveDossierClient()}
+                  className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
+                >
+                  💾 Sauvegarder le dossier
+                </button>
+              </div>
+              {loadingDossiers ? (
+                <p className="mt-2 text-xs text-zinc-500">Chargement…</p>
+              ) : dossiers.length === 0 ? (
+                <p className="mt-2 text-xs text-zinc-500">Aucun dossier enregistré.</p>
+              ) : (
+                <ul className="mt-3 space-y-2">
+                  {dossiers.map((d) => {
+                    const t = d.totaux_json as {
+                      totalAides?: number;
+                      resteCharge?: number;
+                      effectiveCostHT?: number;
+                    };
+                    const montants =
+                      typeof t?.totalAides === "number"
+                        ? ` · Aides ${formatCurrency(t.totalAides)} · RAC ${formatCurrency(t.resteCharge ?? 0)}`
+                        : "";
+                    return (
+                    <li
+                      key={d.id}
+                      className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-xs"
+                    >
+                      <span className="text-zinc-800">
+                        {(d.client_nom || "Sans nom") +
+                          (d.client_prenom ? ` ${d.client_prenom}` : "") +
+                          " — " +
+                          new Date(d.created_at).toLocaleString("fr-FR") +
+                          montants}
+                      </span>
+                      <span className="flex flex-wrap gap-1">
+                        <button
+                          type="button"
+                          onClick={() => applyDossierRow(d)}
+                          className="rounded border border-emerald-500 px-2 py-0.5 font-semibold text-emerald-700 hover:bg-emerald-50"
+                        >
+                          Reprendre
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void deleteDossierClient(d.id)}
+                          className="rounded border border-red-300 px-2 py-0.5 font-semibold text-red-700 hover:bg-red-50"
+                        >
+                          Supprimer
+                        </button>
+                      </span>
+                    </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+
+            <div className="mt-5 flex justify-end">
               <button
-                onClick={() => setCurrentStep(1)}
-                className="rounded-lg border border-zinc-300 bg-white px-6 py-2.5 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
+                type="button"
+                onClick={() => setCurrentStep(2)}
+                className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700"
               >
-                ← Retour
-              </button>
-              <button
-                onClick={() => setCurrentStep(3)}
-                className="rounded-lg bg-[#047857] px-6 py-2.5 text-sm font-medium text-white hover:bg-[#065f46]"
-              >
-                Voir les résultats →
+                Suivant
               </button>
             </div>
-          </div>
+          </section>
         )}
 
-        {/* STEP 3 */}
-        {currentStep === 3 && (
-          <div className="space-y-6">
-            <div className="rounded-2xl border border-zinc-200 bg-white p-6 shadow-sm">
-              <h2 className="mb-6 text-lg font-semibold text-zinc-800">Récapitulatif des aides estimées</h2>
-              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-                {[
-                  { label: "MaPrimeRénov'", value: mprTotal, color: "text-emerald-600" },
-                  { label: "CEE (estimation)", value: ceeEstimate, color: "text-blue-600" },
-                  { label: "TVA 5,5%", value: tvaSavings, color: "text-purple-600" },
-                  { label: "Total aides", value: totalAides, color: "text-orange-600" },
-                ].map(({ label, value, color }) => (
-                  <div key={label} className="rounded-xl border border-zinc-100 bg-zinc-50 p-4 text-center">
-                    <p className="text-sm text-zinc-500">{label}</p>
-                    <p className={`mt-1 text-2xl font-bold ${color}`}>{formatCurrency(value)}</p>
-                  </div>
-                ))}
-              </div>
+        {currentStep === 2 && (
+          <section className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
+            <h2 className="text-lg font-semibold text-zinc-900">Étape 2/3 - Travaux</h2>
+            <p className="mt-1 text-sm text-zinc-600">Règles ANAH Février 2026 appliquées automatiquement.</p>
+
+            <div className="mt-4 grid gap-3 md:grid-cols-2">
+              {[
+                ["comblesPerdusM2", "Isolation combles perdus (m²)"],
+                ["comblesAmenagesM2", "Isolation combles aménagés (m²)"],
+                ["plancherBasM2", "Isolation plancher bas (m²)"],
+                ["toitureTerrasseM2", "Isolation toiture terrasse (m²)"],
+              ].map(([key, label]) => (
+                <label key={key} className="text-sm">
+                  <span className="font-medium text-zinc-700">{label}</span>
+                  <input
+                    type="number"
+                    min={0}
+                    value={works[key as keyof WorksData] as number}
+                    onChange={(e) =>
+                      setWorks((prev) => ({ ...prev, [key]: Math.max(0, safeNumber(e.target.value)) }))
+                    }
+                    className="mt-1 w-full rounded-lg border border-zinc-300 px-3 py-2"
+                  />
+                  {estimateHint(key)}
+                </label>
+              ))}
+
+              <label className="text-sm">
+                <span className="font-medium text-zinc-700">ITE (m²)</span>
+                <div className="mb-1 mt-1 inline-flex rounded-full border border-orange-300 bg-orange-50 px-2 py-0.5 text-xs text-orange-700">
+                  Éligible Parcours Accompagné uniquement
+                </div>
+                <input
+                  type="number"
+                  min={0}
+                  value={works.iteM2}
+                  onChange={(e) => setWorks((prev) => ({ ...prev, iteM2: Math.max(0, safeNumber(e.target.value)) }))}
+                  className="w-full rounded-lg border border-zinc-300 px-3 py-2"
+                />
+                {estimateHint("iteM2")}
+              </label>
+
+              <label className="text-sm">
+                <span className="font-medium text-zinc-700">ITI (m²)</span>
+                <div className="mb-1 mt-1 inline-flex rounded-full border border-orange-300 bg-orange-50 px-2 py-0.5 text-xs text-orange-700">
+                  Éligible Parcours Accompagné uniquement
+                </div>
+                <input
+                  type="number"
+                  min={0}
+                  value={works.itiM2}
+                  onChange={(e) => setWorks((prev) => ({ ...prev, itiM2: Math.max(0, safeNumber(e.target.value)) }))}
+                  className="w-full rounded-lg border border-zinc-300 px-3 py-2"
+                />
+                {estimateHint("itiM2")}
+              </label>
+
+              <label className="text-sm">
+                <span className="font-medium text-zinc-700">Fenêtres / Portes-fenêtres (unités)</span>
+                <input
+                  type="number"
+                  min={0}
+                  value={works.fenetresCount}
+                  onChange={(e) =>
+                    setWorks((prev) => ({ ...prev, fenetresCount: Math.max(0, safeNumber(e.target.value)) }))
+                  }
+                  className="mt-1 w-full rounded-lg border border-zinc-300 px-3 py-2"
+                />
+                {estimateHint("fenetresCount")}
+              </label>
+
+              <label className="text-sm">
+                <span className="font-medium text-zinc-700">Portes d&apos;entrée isolantes (unités)</span>
+                <input
+                  type="number"
+                  min={0}
+                  value={works.portesEntreeCount}
+                  onChange={(e) =>
+                    setWorks((prev) => ({ ...prev, portesEntreeCount: Math.max(0, safeNumber(e.target.value)) }))
+                  }
+                  className="mt-1 w-full rounded-lg border border-zinc-300 px-3 py-2"
+                />
+                {estimateHint("portesEntreeCount")}
+              </label>
+
+              <label className="text-sm">
+                <span className="font-medium text-zinc-700">Volets isolants (unités)</span>
+                <input
+                  type="number"
+                  min={0}
+                  value={works.voletsCount}
+                  onChange={(e) => setWorks((prev) => ({ ...prev, voletsCount: Math.max(0, safeNumber(e.target.value)) }))}
+                  className="mt-1 w-full rounded-lg border border-zinc-300 px-3 py-2"
+                />
+                {estimateHint("voletsCount")}
+              </label>
+
+              <label className="text-sm">
+                <span className="font-medium text-zinc-700">PAC Air/Eau (kW)</span>
+                <select
+                  value={works.pacAirEauKw}
+                  onChange={(e) => setWorks((prev) => ({ ...prev, pacAirEauKw: safeNumber(e.target.value) }))}
+                  className="mt-1 w-full rounded-lg border border-zinc-300 px-3 py-2"
+                >
+                  <option value={0}>Non</option>
+                  {[6, 8, 10, 12, 14, 16].map((kw) => (
+                    <option key={kw} value={kw}>
+                      {kw} kW
+                    </option>
+                  ))}
+                </select>
+                {estimateHint("pacAirEauKw")}
+              </label>
+
+              <label className="text-sm">
+                <span className="font-medium text-zinc-700">PAC Air/Air (kW)</span>
+                <select
+                  value={works.pacAirAirKw}
+                  onChange={(e) => setWorks((prev) => ({ ...prev, pacAirAirKw: safeNumber(e.target.value) }))}
+                  className="mt-1 w-full rounded-lg border border-zinc-300 px-3 py-2"
+                >
+                  <option value={0}>Non</option>
+                  {[6, 8, 10, 12, 14, 16].map((kw) => (
+                    <option key={kw} value={kw}>
+                      {kw} kW
+                    </option>
+                  ))}
+                </select>
+                {estimateHint("pacAirAirKw")}
+              </label>
+
+              <label className="text-sm">
+                <span className="font-medium text-zinc-700">PAC Géothermique (kW)</span>
+                <select
+                  value={works.pacGeoKw}
+                  onChange={(e) => setWorks((prev) => ({ ...prev, pacGeoKw: safeNumber(e.target.value) }))}
+                  className="mt-1 w-full rounded-lg border border-zinc-300 px-3 py-2"
+                >
+                  <option value={0}>Non</option>
+                  {[6, 8, 10, 12, 14, 16].map((kw) => (
+                    <option key={kw} value={kw}>
+                      {kw} kW
+                    </option>
+                  ))}
+                </select>
+                {estimateHint("pacGeoKw")}
+              </label>
+
+              <label className="text-sm">
+                <span className="font-medium text-zinc-700">Chauffe-eau thermodynamique (L)</span>
+                <select
+                  value={works.chauffeEauThermoL}
+                  onChange={(e) => setWorks((prev) => ({ ...prev, chauffeEauThermoL: safeNumber(e.target.value) }))}
+                  className="mt-1 w-full rounded-lg border border-zinc-300 px-3 py-2"
+                >
+                  <option value={0}>Non</option>
+                  {[200, 250, 300].map((liters) => (
+                    <option key={liters} value={liters}>
+                      {liters} L
+                    </option>
+                  ))}
+                </select>
+                {estimateHint("chauffeEauThermoL")}
+              </label>
+
+              <label className="text-sm">
+                <span className="font-medium text-zinc-700">Chauffe-eau solaire (CESI) surface capteurs (m²)</span>
+                <input
+                  type="number"
+                  min={0}
+                  value={works.cesiM2}
+                  onChange={(e) => setWorks((prev) => ({ ...prev, cesiM2: Math.max(0, safeNumber(e.target.value)) }))}
+                  className="mt-1 w-full rounded-lg border border-zinc-300 px-3 py-2"
+                />
+                {estimateHint("cesiM2")}
+              </label>
+
+              <label className="text-sm">
+                <span className="font-medium text-zinc-700">Chaudière biomasse (kW)</span>
+                <div className="mb-1 mt-1 inline-flex rounded-full border border-orange-300 bg-orange-50 px-2 py-0.5 text-xs text-orange-700">
+                  Éligible Parcours Accompagné uniquement
+                </div>
+                <input
+                  type="number"
+                  min={0}
+                  value={works.chaudiereBiomasseKw}
+                  onChange={(e) =>
+                    setWorks((prev) => ({ ...prev, chaudiereBiomasseKw: Math.max(0, safeNumber(e.target.value)) }))
+                  }
+                  className="w-full rounded-lg border border-zinc-300 px-3 py-2"
+                />
+                {estimateHint("chaudiereBiomasseKw")}
+              </label>
+
+              <label className="text-sm">
+                <span className="font-medium text-zinc-700">Dépose cuve fioul</span>
+                <select
+                  value={works.deposeCuveFioul ? "oui" : "non"}
+                  onChange={(e) => setWorks((prev) => ({ ...prev, deposeCuveFioul: e.target.value === "oui" }))}
+                  className="mt-1 w-full rounded-lg border border-zinc-300 px-3 py-2"
+                >
+                  <option value="non">Non</option>
+                  <option value="oui">Oui</option>
+                </select>
+                {estimateHint("deposeCuveFioul")}
+              </label>
+
+              <label className="text-sm">
+                <span className="font-medium text-zinc-700">VMC simple flux hygro (m²)</span>
+                <input
+                  type="number"
+                  min={0}
+                  disabled={vmcDisabled}
+                  value={works.vmcSimpleM2}
+                  onChange={(e) => setWorks((prev) => ({ ...prev, vmcSimpleM2: Math.max(0, safeNumber(e.target.value)) }))}
+                  className="mt-1 w-full rounded-lg border border-zinc-300 px-3 py-2 disabled:bg-zinc-100"
+                />
+                {vmcDisabled && <p className="mt-1 text-xs text-amber-700">VMC éligible uniquement avec au moins un geste d&apos;isolation.</p>}
+                {estimateHint("vmcSimpleM2")}
+              </label>
+
+              <label className="text-sm">
+                <span className="font-medium text-zinc-700">VMC double flux (m²)</span>
+                <input
+                  type="number"
+                  min={0}
+                  disabled={vmcDisabled}
+                  value={works.vmcDoubleM2}
+                  onChange={(e) => setWorks((prev) => ({ ...prev, vmcDoubleM2: Math.max(0, safeNumber(e.target.value)) }))}
+                  className="mt-1 w-full rounded-lg border border-zinc-300 px-3 py-2 disabled:bg-zinc-100"
+                />
+                {vmcDisabled && <p className="mt-1 text-xs text-amber-700">VMC éligible uniquement avec au moins un geste d&apos;isolation.</p>}
+                {estimateHint("vmcDoubleM2")}
+              </label>
+
+              <label className="text-sm">
+                <span className="font-medium text-zinc-700">Panneaux photovoltaïques (kWc)</span>
+                <input
+                  type="number"
+                  min={0}
+                  value={works.pvKwc}
+                  onChange={(e) => setWorks((prev) => ({ ...prev, pvKwc: Math.max(0, safeNumber(e.target.value)) }))}
+                  className="mt-1 w-full rounded-lg border border-zinc-300 px-3 py-2"
+                />
+                <p className="mt-1 text-xs text-blue-700">Non éligible MPR — Prime autoconso disponible.</p>
+                {estimateHint("pvKwc")}
+              </label>
+
+              <label className="text-sm">
+                <span className="font-medium text-zinc-700">Audit énergétique DPE</span>
+                <select
+                  value={works.auditEnergetique ? "oui" : "non"}
+                  onChange={(e) => setWorks((prev) => ({ ...prev, auditEnergetique: e.target.value === "oui" }))}
+                  className="mt-1 w-full rounded-lg border border-zinc-300 px-3 py-2"
+                >
+                  <option value="non">Non</option>
+                  <option value="oui">Oui</option>
+                </select>
+                {estimateHint("auditEnergetique")}
+              </label>
+
+              <label className="text-sm md:col-span-2">
+                <span className="font-medium text-zinc-700">Objectif gain DPE (pour Parcours Accompagné)</span>
+                <select
+                  value={works.dpeGainTarget}
+                  onChange={(e) =>
+                    setWorks((prev) => ({ ...prev, dpeGainTarget: e.target.value as WorksData["dpeGainTarget"] }))
+                  }
+                  className="mt-1 w-full rounded-lg border border-zinc-300 px-3 py-2"
+                >
+                  <option value="2_CLASSES">Gain 2 classes</option>
+                  <option value="3_CLASSES_OU_PLUS">Gain 3 classes ou plus</option>
+                </select>
+              </label>
             </div>
 
-            <div className="grid gap-4 sm:grid-cols-3">
-              <div className="rounded-2xl border border-zinc-200 bg-white p-6 shadow-sm text-center">
-                <p className="text-sm text-zinc-500">Coût total estimé</p>
-                <p className="mt-1 text-2xl font-bold text-zinc-800">{formatCurrency(estimatedWorksCost)}</p>
+            {supParGesteBlocked && (
+              <div className="mt-4 rounded-lg border border-orange-300 bg-orange-50 p-3 text-sm text-orange-800">
+                Revenus SUP : éligible uniquement Parcours Accompagné (pas de calcul par geste).
               </div>
-              <div className="rounded-2xl border border-zinc-200 bg-white p-6 shadow-sm text-center">
-                <p className="text-sm text-zinc-500">Reste à charge</p>
-                <p className="mt-1 text-2xl font-bold text-red-600">{formatCurrency(resteCharge)}</p>
-              </div>
-              <div className="rounded-2xl border border-zinc-200 bg-white p-6 shadow-sm text-center">
-                <p className="text-sm text-zinc-500">Éco-PTZ estimé</p>
-                <p className="mt-1 text-2xl font-bold text-indigo-600">{formatCurrency(ecoPtz)}</p>
-              </div>
-            </div>
-
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="rounded-2xl border border-zinc-200 bg-white p-6 shadow-sm text-center">
-                <p className="text-sm text-zinc-500">Économies annuelles estimées</p>
-                <p className="mt-1 text-2xl font-bold text-emerald-600">{formatCurrency(annualSavings)}</p>
-              </div>
-              <div className="rounded-2xl border border-zinc-200 bg-white p-6 shadow-sm text-center">
-                <p className="text-sm text-zinc-500">Retour sur investissement</p>
-                <p className="mt-1 text-2xl font-bold text-zinc-800">{roiYears.toFixed(1)} ans</p>
-              </div>
-            </div>
+            )}
 
             {step2Rows.length > 0 && (
-              <div className="rounded-2xl border border-zinc-200 bg-white p-6 shadow-sm">
-                <h3 className="mb-4 font-semibold text-zinc-800">Détail par poste</h3>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="border-b border-zinc-200 text-left text-zinc-500">
-                        <th className="pb-2 pr-4 font-medium">Travaux</th>
-                        <th className="pb-2 pr-4 font-medium">Quantité</th>
-                        <th className="pb-2 pr-4 font-medium">Coût estimé</th>
-                        <th className="pb-2 font-medium">MPR estimée</th>
+              <div className="mt-4 overflow-x-auto rounded-xl border border-zinc-200">
+                <table className="min-w-full text-left text-sm">
+                  <thead className="bg-zinc-50 text-zinc-700">
+                    <tr>
+                      <th className="px-3 py-2 font-semibold">Travaux</th>
+                      <th className="px-3 py-2 font-semibold">Quantité</th>
+                      <th className="px-3 py-2 font-semibold">Coût</th>
+                      <th className="px-3 py-2 font-semibold">MPR</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {displayStep2Rows.map((row) => (
+                      <tr key={row.key} className="border-t border-zinc-100">
+                        <td className="px-3 py-2 text-zinc-800">{row.label}</td>
+                        <td className="px-3 py-2 text-zinc-700">{row.quantity}</td>
+                        <td className="px-3 py-2 text-zinc-700">
+                          {formatCurrency(row.lowCost)} - {formatCurrency(row.highCost)}
+                        </td>
+                        <td className="px-3 py-2 text-zinc-700">
+                          {formatCurrency(row.mpr)}
+                          {row.mprNote ? ` (${row.mprNote})` : ""}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {displayStep2Rows.length > 0 && (
+              <div className="mt-4 space-y-2 rounded-xl border border-dashed border-emerald-200 bg-emerald-50/40 p-4">
+                <p className="text-sm font-semibold text-emerald-900">Ajustements MAR (postes saisis)</p>
+                <p className="text-xs text-emerald-800">
+                  Prix HT, CEE, artisan, économies mensuelles : valeurs éditables pour affinage du dossier.
+                </p>
+                <div className="overflow-x-auto rounded-lg border border-emerald-100 bg-white">
+                  <table className="min-w-full text-left text-xs sm:text-sm">
+                    <thead className="bg-emerald-50 text-emerald-900">
+                      <tr>
+                        <th className="px-2 py-2">Poste</th>
+                        <th className="px-2 py-2">Prix HT bas</th>
+                        <th className="px-2 py-2">Prix HT haut</th>
+                        <th className="px-2 py-2">MPR</th>
+                        <th className="px-2 py-2">CEE</th>
+                        <th className="px-2 py-2">Artisan</th>
+                        <th className="px-2 py-2">€/mois</th>
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-zinc-100">
-                      {step2Rows.map((row) => (
-                        <tr key={row.key}>
-                          <td className="py-2 pr-4 font-medium text-zinc-700">
-                            {row.label}
-                            {row.mprNote && <span className="ml-1 text-xs text-zinc-400">({row.mprNote})</span>}
+                    <tbody>
+                      {displayStep2Rows.map((row) => (
+                        <tr key={row.key} className="border-t border-emerald-100">
+                          <td className="px-2 py-1.5 text-zinc-800">{row.label}</td>
+                          <td className="px-2 py-1.5">
+                            <input
+                              className="w-24 rounded border border-zinc-300 px-1 py-0.5"
+                              type="number"
+                              value={marOverrides[row.key]?.lowCost ?? row.lowCost}
+                              onChange={(e) =>
+                                setMarOverrides((prev) => ({
+                                  ...prev,
+                                  [row.key]: { ...prev[row.key], lowCost: safeNumber(e.target.value, row.lowCost) },
+                                }))
+                              }
+                            />
                           </td>
-                          <td className="py-2 pr-4 text-zinc-600">{row.quantity}</td>
-                          <td className="py-2 pr-4 text-zinc-600">
-                            {formatCurrency(row.lowCost)} – {formatCurrency(row.highCost)}
+                          <td className="px-2 py-1.5">
+                            <input
+                              className="w-24 rounded border border-zinc-300 px-1 py-0.5"
+                              type="number"
+                              value={marOverrides[row.key]?.highCost ?? row.highCost}
+                              onChange={(e) =>
+                                setMarOverrides((prev) => ({
+                                  ...prev,
+                                  [row.key]: { ...prev[row.key], highCost: safeNumber(e.target.value, row.highCost) },
+                                }))
+                              }
+                            />
                           </td>
-                          <td className="py-2 font-semibold text-emerald-600">{formatCurrency(row.mpr)}</td>
+                          <td className="px-2 py-1.5">
+                            <input
+                              className="w-24 rounded border border-zinc-300 px-1 py-0.5"
+                              type="number"
+                              value={marOverrides[row.key]?.mpr ?? row.mpr}
+                              onChange={(e) =>
+                                setMarOverrides((prev) => ({
+                                  ...prev,
+                                  [row.key]: { ...prev[row.key], mpr: safeNumber(e.target.value, row.mpr) },
+                                }))
+                              }
+                            />
+                          </td>
+                          <td className="px-2 py-1.5">
+                            <input
+                              className="w-24 rounded border border-zinc-300 px-1 py-0.5"
+                              type="number"
+                              title="CEE poste"
+                              value={
+                                marOverrides[row.key]?.ceeAmount ?? Math.round(ceeRowAlloc[row.key] ?? 0)
+                              }
+                              onChange={(e) =>
+                                setMarOverrides((prev) => ({
+                                  ...prev,
+                                  [row.key]: { ...prev[row.key], ceeAmount: safeNumber(e.target.value, 0) },
+                                }))
+                              }
+                            />
+                          </td>
+                          <td className="px-2 py-1.5">
+                            <input
+                              className="w-32 rounded border border-zinc-300 px-1 py-0.5 sm:w-40"
+                              placeholder="Artisan"
+                              value={marOverrides[row.key]?.artisan ?? ""}
+                              onChange={(e) =>
+                                setMarOverrides((prev) => ({
+                                  ...prev,
+                                  [row.key]: { ...prev[row.key], artisan: e.target.value },
+                                }))
+                              }
+                            />
+                          </td>
+                          <td className="px-2 py-1.5">
+                            <input
+                              className="w-20 rounded border border-zinc-300 px-1 py-0.5"
+                              type="number"
+                              placeholder="0"
+                              value={marOverrides[row.key]?.monthlyEuro ?? ""}
+                              onChange={(e) =>
+                                setMarOverrides((prev) => ({
+                                  ...prev,
+                                  [row.key]: {
+                                    ...prev[row.key],
+                                    monthlyEuro: safeNumber(e.target.value, 0),
+                                  },
+                                }))
+                              }
+                            />
+                          </td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
                 </div>
+                <label className="mt-2 flex flex-col gap-1 text-sm text-zinc-800">
+                  <span className="font-medium">Aides locales additionnelles (€)</span>
+                  <input
+                    type="number"
+                    min={0}
+                    className="max-w-xs rounded-lg border border-zinc-300 px-3 py-2"
+                    value={aidesLocalesEuro}
+                    onChange={(e) => setAidesLocalesEuro(Math.max(0, safeNumber(e.target.value)))}
+                  />
+                </label>
               </div>
             )}
 
-            {saveMessage && (
-              <div className="rounded-lg bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
-                {saveMessage}
-              </div>
-            )}
 
-            <div className="flex flex-wrap gap-3">
+            <div className="mt-5 flex items-center justify-between">
               <button
-                onClick={() => setCurrentStep(2)}
-                className="rounded-lg border border-zinc-300 bg-white px-6 py-2.5 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
+                type="button"
+                onClick={() => setCurrentStep(1)}
+                className="rounded-lg border border-zinc-300 px-4 py-2 text-sm font-semibold text-zinc-700 hover:bg-zinc-100"
               >
-                ← Modifier les travaux
+                Retour
               </button>
               <button
-                onClick={saveCalculation}
-                disabled={saving || !userId}
-                className="rounded-lg bg-blue-600 px-6 py-2.5 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+                type="button"
+                onClick={async () => {
+                  setCurrentStep(3);
+                  await saveCalculation();
+                }}
+                className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700"
               >
-                {saving ? "Enregistrement…" : "💾 Sauvegarder"}
-              </button>
-              <button
-                onClick={generatePdf}
-                className="rounded-lg bg-[#047857] px-6 py-2.5 text-sm font-medium text-white hover:bg-[#065f46]"
-              >
-                📄 Générer le PDF
+                Calculer mes aides
               </button>
             </div>
-          </div>
+          </section>
+        )}
+
+        {currentStep === 3 && (
+          <section className="space-y-4 rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
+            <h2 className="text-lg font-semibold text-zinc-900">Étape 3/3 - Résultats</h2>
+
+            <div className="grid gap-4 lg:grid-cols-3">
+              <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-4 lg:col-span-1">
+                <DpeGauge
+                  current={step1.dpe as DpeLetter}
+                  target={dpeCibleRapport as DpeLetter}
+                  onPickTarget={(lettre) => setDpeTargetManual(lettre)}
+                />
+              </div>
+              <div className="rounded-xl border border-zinc-200 bg-white p-4 lg:col-span-2">
+                <DashboardRoiChart
+                  years={20}
+                  annualBillWithoutWorks={annualBillSansTravaux}
+                  annualBillWithWorks={annualBillAvecTravaux}
+                  resteACharge={resteCharge}
+                />
+              </div>
+              <div className="rounded-xl border border-zinc-200 bg-white p-4 lg:col-span-3">
+                <DashboardAidesPie
+                  mpr={mprTotal}
+                  cee={effectiveCeeTotal}
+                  tva={tvaSavings}
+                  aidesLocales={aidesLocalesEtRegion}
+                  reste={resteCharge}
+                />
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-zinc-200 p-4">
+              <p className="text-sm font-semibold text-zinc-800">SECTION A — Type de rénovation recommandé</p>
+              <p className="mt-2 text-sm text-zinc-700">
+                {parcoursEligible ? "✅ Éligible Parcours Accompagné" : "🔧 Rénovation par geste uniquement"}
+              </p>
+            </div>
+
+            <div className="rounded-xl border border-zinc-200 p-4">
+              <p className="text-sm font-semibold text-zinc-800">SECTION B/C — Calcul MPR</p>
+              <p className="mt-2 text-sm text-zinc-700">Profil : {PROFILE_LABELS[profile]} ({profile})</p>
+              <p className="text-sm text-zinc-700">MPR estimée : {formatCurrency(mprTotal)}</p>
+              {parcoursEligible && (
+                <p className="text-xs text-zinc-500">
+                  Calcul Parcours = MIN(coût travaux, {works.dpeGainTarget === "2_CLASSES" ? "30 000 €" : "40 000 €"}) × taux profil.
+                </p>
+              )}
+              {!parcoursEligible && <p className="text-xs text-zinc-500">Calcul par geste ANAH Février 2026 (avec plafonds par poste).</p>}
+            </div>
+
+            <div className="rounded-xl border border-zinc-200 p-4 text-sm text-zinc-700">
+              <p className="font-semibold text-zinc-800">SECTION D — CEE (cumulable MPR)</p>
+              <p className="mt-1">CEE estimée : {formatCurrency(effectiveCeeTotal)}</p>
+              <p className="text-xs text-zinc-500">Montants variables selon fournisseur (+/-30%).</p>
+            </div>
+
+            <div className="rounded-xl border border-zinc-200 p-4 text-sm text-zinc-700">
+              <p className="font-semibold text-zinc-800">SECTION E/F — Éco-PTZ et TVA réduite</p>
+              <p>Éco-PTZ disponible : {formatCurrency(ecoPtz)}</p>
+              <p>TVA économisée (5,5%) : {formatCurrency(tvaSavings)}</p>
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-3">💰 MPR estimée : <strong>{formatCurrency(mprTotal)}</strong></div>
+              <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-3">💰 CEE estimée : <strong>{formatCurrency(effectiveCeeTotal)}</strong></div>
+              <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-3">💰 Éco-PTZ disponible : <strong>{formatCurrency(ecoPtz)}</strong></div>
+              <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-3">💰 TVA économisée : <strong>{formatCurrency(tvaSavings)}</strong></div>
+              <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-3">✅ TOTAL AIDES : <strong>{formatCurrency(totalAides)}</strong></div>
+              <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-3">🏛️ AuRA + locales : <strong>{formatCurrency(aidesLocalesEtRegion)}</strong></div>
+              <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-3">🤝 Prise en charge MAR : <strong>{formatCurrency(MAR_PRISE_EN_CHARGE)}</strong></div>
+
+              <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-3">🏠 Coût travaux HT : <strong>{formatCurrency(effectiveCostHT)}</strong></div>
+              <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-3">💳 Reste à charge : <strong>{formatCurrency(resteCharge)}</strong></div>
+              <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-3">📈 Économies annuelles : <strong>{formatCurrency(annualSavings)}</strong></div>
+              <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-3">⏱️ ROI estimé : <strong>{roiYears.toFixed(1)} années</strong></div>
+            </div>
+
+            <div className="no-print flex flex-wrap items-center gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setCurrentStep(2)}
+                className="rounded-lg border border-zinc-300 px-4 py-2 text-sm font-semibold text-zinc-700 hover:bg-zinc-100"
+              >
+                Retour aux travaux
+              </button>
+              <button onClick={() => window.print()}
+                className="btn-print">
+                🖨️ Imprimer / Enregistrer en PDF
+              </button>
+              <button
+                type="button"
+                disabled={emailSending || !step1.clientEmail.trim()}
+                onClick={async () => {
+                  const to = step1.clientEmail.trim();
+                  if (!to) {
+                    setSaveMessage("Renseignez l'e-mail client (étape 1).");
+                    return;
+                  }
+                  setEmailSending(true);
+                  setSaveMessage(null);
+                  try {
+                    const gainClasses = works.dpeGainTarget === "3_CLASSES_OU_PLUS" ? 3 : 2;
+                    const dpeGainTarget = dpeCibleRapport;
+                    const costSum =
+                      displayStep2Rows.reduce((acc, row) => acc + (row.lowCost + row.highCost) / 2, 0) || 1;
+                    const selectedActions = displayStep2Rows.map((row) => {
+                      const costHT = Math.round((row.lowCost + row.highCost) / 2);
+                      const mprAmount = Math.round(row.mpr);
+                      const mprRate =
+                        costHT > 0 ? Math.min(100, Math.round((mprAmount / costHT) * 1000) / 10) : 0;
+                      const weight = costHT / costSum;
+                      const rowCeeOverride = marOverrides[row.key]?.ceeAmount;
+                      const ceePortion =
+                        rowCeeOverride != null && Number.isFinite(rowCeeOverride)
+                          ? rowCeeOverride
+                          : ceeRowAlloc[row.key] ?? 0;
+                      return {
+                        label: row.label,
+                        costHT,
+                        mprRate,
+                        mprAmount,
+                        ceeAmount: Math.round(ceePortion),
+                        tva: Math.round(tvaSavings * weight),
+                      };
+                    });
+                    const input = {
+                      clientName: step1.clientName.trim() || userEmail?.split("@")[0] || "Client",
+                      clientPrenom: step1.clientPrenom.trim() || null,
+                      clientAddress: step1.clientAddress.trim() || "—",
+                      clientEmail: to,
+                      clientPhone: step1.clientPhone.trim() || "",
+                      advisorName: "Sylvain LEMBELEMBE",
+                      advisorCompany: "ENERGIA CONSEIL IA®",
+                      reportDate: new Date().toISOString().split("T")[0],
+                      mprProfile: profile,
+                      isIdf: step1.zone === "IDF",
+                      occupants: step1.persons,
+                      annualIncome: step1.income,
+                      dpe: step1.dpe,
+                      dpeGainTarget,
+                      gainClasses,
+                      actionCount,
+                      renovationType: parcoursEligible ? "parcours_accompagne" : "monogeste",
+                      selectedActions,
+                      totalCostHT: Math.round(effectiveCostHT),
+                      totalMpr: Math.round(mprTotal),
+                      totalCee: Math.round(effectiveCeeTotal),
+                      totalTva: Math.round(tvaSavings),
+                      totalAides: Math.round(totalAides),
+                      resteACharge: Math.round(resteCharge),
+                      ecoPtz,
+                      roi: roiYears,
+                    };
+                    const res = await fetch("/api/send-renovation-report", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ input, toEmail: to }),
+                    });
+                    if (!res.ok) {
+                      const j = (await res.json().catch(() => ({}))) as { error?: string };
+                      throw new Error(j.error || res.statusText);
+                    }
+                    setSaveMessage("Rapport envoyé par e-mail.");
+                  } catch (e) {
+                    setSaveMessage(e instanceof Error ? e.message : "Erreur envoi e-mail");
+                  } finally {
+                    setEmailSending(false);
+                  }
+                }}
+                className="rounded-lg border border-emerald-600 bg-white px-4 py-2 text-sm font-semibold text-emerald-700 hover:bg-emerald-50 disabled:opacity-50"
+              >
+                ✉️ Envoyer le rapport par e-mail
+              </button>
+              {saving && <span className="text-sm text-zinc-500">Enregistrement Supabase…</span>}
+              {saveMessage && <span className="text-sm text-zinc-600">{saveMessage}</span>}
+            </div>
+
+            <p className="rounded-lg border border-zinc-200 bg-zinc-50 p-3 text-xs text-zinc-600">
+              Calcul estimatif basé sur les barèmes ANAH Février 2026. Montants non contractuels. Sous réserve d&apos;éligibilité.
+            </p>
+          </section>
         )}
       </main>
     </div>
